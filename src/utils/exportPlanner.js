@@ -437,6 +437,7 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                     summaryRows.push({
                         ...baseKeys,
                         n_points: valid.length,
+                        direction_reversed: deviations._reversed ? 1 : 0,
                         dev_lateral_signed_mean_mm: mean(laterals),
                         dev_lateral_abs_mean_mm: mean(absLat),
                         dev_lateral_abs_median_mm: median(sortedAbs),
@@ -495,6 +496,9 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         y_local_mm: p.y * 1000,
                         z_local_mm: p.z * 1000,
                         ref_arclength_m: d?.arclength_m ?? '',
+                        ref_foot_x_mm: d?.foot_x !== null && d?.foot_x !== undefined ? d.foot_x * 1000 : '',
+                        ref_foot_y_mm: d?.foot_y !== null && d?.foot_y !== undefined ? d.foot_y * 1000 : '',
+                        ref_foot_z_mm: d?.foot_z !== null && d?.foot_z !== undefined ? d.foot_z * 1000 : '',
                         dev_lateral_mm: d?.dev_lateral_mm ?? '',
                     });
                 }

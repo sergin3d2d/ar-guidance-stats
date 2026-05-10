@@ -7,6 +7,7 @@ import {
     transformDrawPoints,
     cumulativeArclength,
     computeDeviations,
+    detectAndFlipDirection,
     measureAlignmentOffset,
 } from '../utils/task2Spatial';
 
@@ -387,33 +388,62 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }, {})
                     ).map(([conditionName, seriesGroup], cIdx) => {
                         const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
-                        const refPoints = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
-                        const refDistances = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
-                        const milestoneArcs = conditionName === 'Visible' ? visibleMilestoneArcs : obstructMilestoneArcs;
-                        const totalArc = refDistances[refDistances.length - 1] || 0;
+                        const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
+                        const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
+                        const milestonesOrdered = conditionName === 'Visible' ? visibleMilestonesOrdered : obstructMilestonesOrdered;
+
+                        // Detect direction once per condition using the first available series
+                        // with data, so all series in this panel share the same X axis orientation.
+                        const firstSeriesWithData = seriesGroup.find((s) => {
+                            const i = filteredSeries.indexOf(s);
+                            return transformedSeries[i] && transformedSeries[i].some((p) => !p.is_line_break);
+                        });
+                        let refPath = refPointsRaw;
+                        let refDist = refDistRaw;
+                        let reversed = false;
+                        if (firstSeriesWithData) {
+                            const dirIdx = filteredSeries.indexOf(firstSeriesWithData);
+                            const flip = detectAndFlipDirection(transformedSeries[dirIdx], refPointsRaw, refDistRaw);
+                            refPath = flip.refPath;
+                            refDist = flip.refArclength;
+                            reversed = flip.reversed;
+                        }
+                        const totalArc = refDist[refDist.length - 1] || 0;
+
+                        // Recompute milestone arclengths against the directional ref
+                        const milestoneArcs = milestonesOrdered.map((m) => {
+                            let bestIdx = 0, bestSq = Infinity;
+                            for (let j = 0; j < refPath.length; j++) {
+                                const r = refPath[j];
+                                if (r.x === null) continue;
+                                const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
+                                if (d < bestSq) { bestSq = d; bestIdx = j; }
+                            }
+                            return refDist[bestIdx] || 0;
+                        });
 
                         // Convex/concave background regions (heuristic: above/below ref Y midline)
                         const bgShapes = [];
                         let currentState = null;
                         let startX = 0;
-                        for (let j = 0; j < refPoints.length; j++) {
-                            if (refPoints[j].x === null) continue;
-                            const state = refPoints[j].y > yMid ? 'convex' : 'concave';
+                        for (let j = 0; j < refPath.length; j++) {
+                            if (refPath[j].x === null) continue;
+                            const state = refPath[j].y > yMid ? 'convex' : 'concave';
                             if (currentState === null) {
                                 currentState = state;
-                                startX = refDistances[j];
+                                startX = refDist[j];
                             } else if (currentState !== state) {
                                 bgShapes.push({
                                     type: 'rect', xref: 'x', yref: 'paper',
-                                    x0: startX, x1: refDistances[j], y0: 0, y1: 1,
+                                    x0: startX, x1: refDist[j], y0: 0, y1: 1,
                                     fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.08)' : 'rgba(100,200,100,0.08)',
                                     layer: 'below', line: { width: 0 },
                                 });
                                 currentState = state;
-                                startX = refDistances[j];
+                                startX = refDist[j];
                             }
                         }
-                        if (currentState !== null && refPoints.length > 0) {
+                        if (currentState !== null && refPath.length > 0) {
                             bgShapes.push({
                                 type: 'rect', xref: 'x', yref: 'paper',
                                 x0: startX, x1: totalArc, y0: 0, y1: 1,
@@ -435,27 +465,27 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         const traces = seriesGroup.flatMap((s) => {
                             const origIdx = filteredSeries.indexOf(s);
                             const transformed = transformedSeries[origIdx];
-                            const deviations = computeDeviations(transformed, refPoints, refDistances);
+                            // Direction was already detected above; pass the directional ref
+                            // and disable autoflip so each series uses the same orientation.
+                            const deviations = computeDeviations(transformed, refPath, refDist, { autoFlipDirection: false });
 
-                            const pairs = [];
+                            // Time-ordered: walk in array order (= recording order). No re-sort.
+                            const xs = [], ys = [];
                             for (let i = 0; i < deviations.length; i++) {
                                 const d = deviations[i];
-                                if (!d || d.dev_total_mm === null) continue;
-                                pairs.push({
-                                    x: d.arclength_m,
-                                    perp: d.dev_perp_mm,
-                                    lateral: d.dev_lateral_mm,
-                                    total: d.dev_total_mm,
-                                    pointIdx: i,
-                                });
+                                if (!d || d.dev_lateral_mm === null) {
+                                    xs.push(null); ys.push(null); // creates a gap in the line at line breaks
+                                    continue;
+                                }
+                                xs.push(d.arclength_m);
+                                ys.push(d.dev_lateral_mm);
                             }
-                            pairs.sort((a, b) => a.x - b.x);
                             const color = getColor(s.method, s.condition);
                             return [{
-                                x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.lateral),
+                                x: xs, y: ys,
                                 type: 'scatter', mode: 'lines', name: s.name,
                                 line: { color, width: 1.6 },
+                                connectgaps: false,
                                 legendgroup: s.name,
                                 hovertemplate: 'arc=%{x:.3f} m<br>lateral=%{y:.2f} mm<extra></extra>',
                             }];
@@ -480,14 +510,14 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Each user point is projected onto the planned path. Y = lateral deviation in mm — in-surface, sideways from the path direction (+ one side / − the other). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference path; total path length ≈ {totalArc.toFixed(2)} m.
+                                    User points are walked in recording (timestamp) order; each point projects onto the closest segment of the planned path within ±15 cm of the previous match. {reversed ? 'Reference direction was auto-flipped to match user traversal. ' : ''}Y = lateral deviation in mm (in-surface, signed). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference; total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
                                     layout={{
                                         ...layoutTheme,
                                         shapes: bgShapes,
-                                        xaxis: { title: `Arclength along Reference Path (m) — total ${totalArc.toFixed(3)} m` },
+                                        xaxis: { title: `Arclength along Reference Path (m) — total ${totalArc.toFixed(3)} m${reversed ? ' (auto-reversed)' : ''}` },
                                         yaxis: { title: 'Lateral deviation (mm)', zeroline: true, zerolinecolor: 'rgba(0,0,0,0.3)' },
                                         legend: { orientation: 'h', y: -0.2 },
                                     }}

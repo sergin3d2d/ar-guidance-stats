@@ -37,6 +37,7 @@ const {
     transformDrawPoints,
     transformPointToLocal,
     cumulativeArclength,
+    computeDeviations,
     measureAlignmentOffset,
 } = await import('../src/utils/task2Spatial.js');
 
@@ -121,9 +122,13 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     console.log(`\n=== ${outRefName} + ${outTracedName} ===`);
 
     const refTxtContent = fs.readFileSync(refTxt, 'utf8');
-    // Maya export: keep outlier removal, but skip smoothing so sharp corners
-    // stay sharp for visual evaluation.
-    const ref = parseReferenceTxt(refTxtContent, { smooth: false, removeOutliers: true });
+    // Smoothed reference — what the dashboard projects against. This is the
+    // canonical analytical path; measurement lines are drawn against it.
+    const refSmooth = parseReferenceTxt(refTxtContent, { smooth: true, removeOutliers: true });
+    const refSmoothArc = cumulativeArclength(refSmooth.path);
+    // Cleaned but unsmoothed — useful as a side-by-side to inspect corner
+    // shape (smoothing softens turns).
+    const refRaw = parseReferenceTxt(refTxtContent, { smooth: false, removeOutliers: true });
 
     const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, tracedFile), 'utf8'));
     const v = tracedJson.payload.find((p) => p.name === 'SurfaceDrawing')?.values;
@@ -131,7 +136,12 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
 
     const transform = getSurfaceTransform(v);
     const transformed = transformDrawPoints(v.all_draw_points, transform);
-    const offsetMm = measureAlignmentOffset(transformed, ref.path);
+    const offsetMm = measureAlignmentOffset(transformed, refSmooth.path);
+
+    // Run the dashboard's matching algorithm so the measurement lines we
+    // draw in Maya are exactly what the chart used: time-ordered, monotonic
+    // window match, with auto direction flip.
+    const deviations = computeDeviations(transformed, refSmooth.path, refSmoothArc);
 
     // JSON-defined milestones — the experiment's actual measurement targets.
     // Each entry has both planned (reference_position) and the user's recorded
@@ -158,10 +168,14 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
         };
     });
 
-    console.log(`  Reference path (.txt smoothed): ${ref.path.length} points`);
+    console.log(`  Reference path (smoothed, used for matching): ${refSmooth.path.length} pts`);
+    console.log(`  Reference path (raw / unsmoothed):            ${refRaw.path.length} pts`);
     console.log(`  Traced trial: ${tracedFile}`);
     console.log(`  ${v.all_draw_points.length} draw points → ${transformed.length} registered points`);
     console.log(`  Centroid offset from reference: ${offsetMm.toFixed(2)} mm (in surface-local frame)`);
+    console.log(`  Direction auto-flipped: ${deviations._reversed ? 'YES (user traced reference in reverse)' : 'no'}`);
+    const validDevs = deviations.filter((d) => d && d.dev_lateral_mm !== null);
+    console.log(`  Lateral deviation: n=${validDevs.length}  rms=${Math.sqrt(validDevs.reduce((s, d) => s + d.dev_lateral_mm ** 2, 0) / validDevs.length).toFixed(2)} mm  max|=${Math.max(...validDevs.map((d) => Math.abs(d.dev_lateral_mm))).toFixed(2)} mm`);
     console.log(`\n  Milestone pairs (from JSON reference_point_measurements):`);
     console.log(`    label  name           planned (m)                         user hit (m)                         dist (mm)`);
     for (const m of runtimeMilestones) {
@@ -172,13 +186,17 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     // --- File 1: planned reference path -------------------------------------
 
     let refScene = mayaHeader(outRefName);
-    refScene += '\n// --- Reference path (NURBS curves, one per continuous segment) ---\n';
-    refScene += mayaTransformGroup('reference_path');
-    refScene += mayaNurbsCurveSegments('reference_path', ref.path);
+    refScene += '\n// --- Smoothed reference path (canonical — what the dashboard projects against) ---\n';
+    refScene += mayaTransformGroup('reference_path_smoothed');
+    refScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
 
-    refScene += '\n// --- Reference path points (locators) ---\n';
+    refScene += '\n// --- Raw cleaned reference path (no smoothing — preserves sharp corners) ---\n';
+    refScene += mayaTransformGroup('reference_path_raw');
+    refScene += mayaNurbsCurveSegments('reference_path_raw', refRaw.path);
+
+    refScene += '\n// --- Smoothed reference path points (locators) ---\n';
     refScene += mayaTransformGroup('reference_path_points');
-    ref.path.forEach((p, i) => {
+    refSmooth.path.forEach((p, i) => {
         if (p.x === null) return;
         refScene += mayaLocator(`pt_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_points');
     });
@@ -204,6 +222,10 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     }
 
     let tracedScene = mayaHeader(outTracedName);
+    tracedScene += '\n// --- Smoothed reference path (for overlay context) ---\n';
+    tracedScene += mayaTransformGroup('reference_path_smoothed');
+    tracedScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
+
     tracedScene += '\n// --- Traced path (NURBS curves, one per continuous stroke) ---\n';
     tracedScene += mayaTransformGroup('traced_path');
     tracedScene += mayaNurbsCurveSegments('traced_path', tracedSegmented);
@@ -213,6 +235,28 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     transformed.forEach((p, i) => {
         tracedScene += mayaLocator(`tp_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'traced_path_points');
     });
+
+    // Measurement lines: one straight line per user point connecting the
+    // user point to its matched foot on the smoothed reference path.
+    // These are exactly what the dashboard chart computes.
+    tracedScene += '\n// --- Measurement lines (user point → matched foot on smoothed reference) ---\n';
+    tracedScene += '// One degree-1 NURBS curve per user point; length = total deviation.\n';
+    tracedScene += '// Direction-aware monotonic matching (windowed search) — same algorithm\n';
+    tracedScene += '// as the Path Deviation Profile chart in the dashboard.\n';
+    tracedScene += mayaTransformGroup('measurements');
+    let nMeas = 0;
+    for (let i = 0; i < transformed.length; i++) {
+        const p = transformed[i];
+        const d = deviations[i];
+        if (!d || d.foot_x === null || p.is_line_break) continue;
+        const segs = [
+            { x: p.x, y: p.y, z: p.z },
+            { x: d.foot_x, y: d.foot_y, z: d.foot_z },
+        ];
+        tracedScene += mayaNurbsCurveSegments(`meas_${String(i).padStart(4, '0')}`, segs);
+        nMeas += 1;
+    }
+    console.log(`  ${nMeas} measurement lines drawn`);
 
     tracedScene += `\n// --- User-hit milestones (closest_draw_point_position from JSON) ---\n`;
     tracedScene += `// Same labels as ${outRefName} — the distance between the matching\n`;

@@ -247,16 +247,9 @@ export const cumulativeArclength = (points) => {
 // foot point and decomposed deviation. Uses true closest-segment projection,
 // not closest-vertex (handles sparse references correctly).
 //
-// Decomposition at the foot F:
-//   T (tangent)   = normalized segment direction
-//   N (normal)    = user point's surface normal if available, else cross of
-//                   adjacent ref segments (estimates surface normal from path)
-//   B (binormal)  = T × N (in-surface, perpendicular to the path direction)
-//
-//   dev_perp     = (P - F) · N    → off-surface, signed (+ outward / − inward)
-//   dev_lateral  = (P - F) · B    → in-surface sideways, signed
-//   dev_total    = |P - F|        → 3D Euclidean
-const projectOntoPolyline = (p, refPoints, refArclength) => {
+// Optional arcWindow = [arcMin, arcMax]: only consider segments whose midpoint
+// arclength falls inside this window. Used to enforce monotonic matching.
+const projectOntoPolyline = (p, refPoints, refArclength, arcWindow = null) => {
     let bestSegIdx = -1;
     let bestT = 0;
     let bestFoot = null;
@@ -266,6 +259,12 @@ const projectOntoPolyline = (p, refPoints, refArclength) => {
         const a = refPoints[i];
         const b = refPoints[i + 1];
         if (a.x === null || b.x === null) continue;
+
+        if (arcWindow) {
+            const segMidArc = ((refArclength?.[i] ?? 0) + (refArclength?.[i + 1] ?? 0)) / 2;
+            if (segMidArc < arcWindow[0] || segMidArc > arcWindow[1]) continue;
+        }
+
         const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
         const segLenSq = abx * abx + aby * aby + abz * abz;
         if (segLenSq < 1e-12) continue;
@@ -285,53 +284,100 @@ const projectOntoPolyline = (p, refPoints, refArclength) => {
     return { segIdx: bestSegIdx, t: bestT, foot: bestFoot, distSq: bestSq };
 };
 
-// For each transformed user point, project onto the reference polyline.
-// Returns per-point: arclength of foot (m), perp/lateral/total deviation (mm),
-// and metadata for export.
-export const computeDeviations = (transformedPoints, refPoints, refArclength) => {
+// Detect whether the user traced the reference in reverse direction. If so,
+// returns a flipped (refPath, refArclength) so that subsequent matching gets
+// arclength = 0 at the user's start. Threshold: first user point must be
+// > startDistMin away from refStart AND distance to refEnd must be < half the
+// distance to refStart (clear preference for the "wrong" end).
+export const detectAndFlipDirection = (transformedPoints, refPath, refArclength, options = {}) => {
+    const { startDistMin = 0.10 } = options;
+    const firstUser = transformedPoints.find((p) => !p.is_line_break);
+    const refStart = refPath.find((p) => p.x !== null);
+    const refEnd = [...refPath].reverse().find((p) => p.x !== null);
+    if (!firstUser || !refStart || !refEnd) {
+        return { refPath, refArclength, reversed: false };
+    }
+    const dStart = Math.hypot(firstUser.x - refStart.x, firstUser.y - refStart.y, firstUser.z - refStart.z);
+    const dEnd = Math.hypot(firstUser.x - refEnd.x, firstUser.y - refEnd.y, firstUser.z - refEnd.z);
+    const reversed = dStart > startDistMin && dEnd < dStart * 0.5;
+    if (!reversed) {
+        return { refPath, refArclength, reversed: false };
+    }
+    const flippedPath = [...refPath].reverse();
+    const flippedArc = cumulativeArclength(flippedPath);
+    return { refPath: flippedPath, refArclength: flippedArc, reversed: true };
+};
+
+// Compute per-point deviations against a reference polyline.
+//
+// - Walks transformedPoints in array order (= recording / timestamp order).
+//   Callers should plot results in the returned order, not sorted by arclength,
+//   so user backtracking / self-crossings render honestly as a back-and-forth
+//   line on the chart.
+// - Auto-flip direction: if the user's first traced point is much closer to
+//   the reference's last point than its first, the reference is reversed so
+//   arclength = 0 corresponds to where the user started.
+// - Each user point projects to the GLOBALLY closest segment of the reference.
+//   No monotonicity constraint — for a tracing task, the closest-segment is
+//   the geometrically meaningful match even when the trace doubles back.
+//
+// Decomposition at the foot F (per point):
+//   T (tangent)   = normalized segment direction
+//   N (normal)    = user point's surface normal if available, else estimated
+//   B (binormal)  = T × N    (in-surface, perpendicular to path direction)
+//
+//   dev_lateral  = (P - F) · B    in-surface sideways, signed
+//   dev_perp     = (P - F) · N    off-surface, signed (+ outward / − inward)
+//   dev_total    = |P - F|        3D Euclidean
+//
+// The returned array carries _reversed / _refPath / _refArclength so callers
+// can use the same flipped reference for milestone arclengths and overlays.
+export const computeDeviations = (transformedPoints, refPoints, refArclength, options = {}) => {
+    const { autoFlipDirection = true } = options;
+
+    let workingRef = refPoints;
+    let workingArc = refArclength;
+    let reversed = false;
+    if (autoFlipDirection) {
+        const flip = detectAndFlipDirection(transformedPoints, refPoints, refArclength);
+        workingRef = flip.refPath;
+        workingArc = flip.refArclength;
+        reversed = flip.reversed;
+    }
+
     const out = new Array(transformedPoints.length);
+    const buildEmpty = () => ({
+        seg_index: null, foot_x: null, foot_y: null, foot_z: null,
+        arclength_m: null, dev_total_mm: null, dev_perp_mm: null, dev_lateral_mm: null,
+    });
+
     for (let i = 0; i < transformedPoints.length; i++) {
         const p = transformedPoints[i];
         if (p.is_line_break) {
-            out[i] = {
-                seg_index: null, arclength_m: null,
-                dev_total_mm: null, dev_perp_mm: null, dev_lateral_mm: null,
-            };
+            out[i] = buildEmpty();
             continue;
         }
-
-        const proj = projectOntoPolyline(p, refPoints, refArclength);
+        const proj = projectOntoPolyline(p, workingRef, workingArc, null);
         if (proj.segIdx < 0) {
-            out[i] = {
-                seg_index: null, arclength_m: null,
-                dev_total_mm: null, dev_perp_mm: null, dev_lateral_mm: null,
-            };
+            out[i] = buildEmpty();
             continue;
         }
 
         const F = proj.foot;
         const dx = p.x - F.x, dy = p.y - F.y, dz = p.z - F.z;
         const distTotal = Math.sqrt(proj.distSq);
-
-        // Tangent
         const tlen = F.segLen;
         const tx = F.abx / tlen, ty = F.aby / tlen, tz = F.abz / tlen;
 
-        // Normal at F: prefer user point's captured normal (it's on the surface);
-        // fall back to estimating from the path itself (cross of adjacent tangents).
         let nx, ny, nz;
         if (p.nx !== null && p.ny !== null && p.nz !== null) {
             const nLen = Math.hypot(p.nx, p.ny, p.nz) || 1;
             nx = p.nx / nLen; ny = p.ny / nLen; nz = p.nz / nLen;
-            // Orthogonalize against tangent so decomposition is clean.
             const dotTN = nx * tx + ny * ty + nz * tz;
             nx -= dotTN * tx; ny -= dotTN * ty; nz -= dotTN * tz;
             const renorm = Math.hypot(nx, ny, nz) || 1;
             nx /= renorm; ny /= renorm; nz /= renorm;
         } else {
-            // Fallback: a perpendicular-to-tangent direction in the plane of
-            // the largest deviation component. Usable, less anchored to reality.
-            // Pick world-Y if not parallel to tangent, else world-Z.
             let upx = 0, upy = 1, upz = 0;
             if (Math.abs(tx * upx + ty * upy + tz * upz) > 0.95) { upx = 0; upy = 0; upz = 1; }
             const dotTU = tx * upx + ty * upy + tz * upz;
@@ -340,24 +386,27 @@ export const computeDeviations = (transformedPoints, refPoints, refArclength) =>
             nx /= renorm; ny /= renorm; nz /= renorm;
         }
 
-        // Binormal = T × N
         const bx = ty * nz - tz * ny;
         const by = tz * nx - tx * nz;
         const bz = tx * ny - ty * nx;
 
         const devPerp = dx * nx + dy * ny + dz * nz;
         const devLateral = dx * bx + dy * by + dz * bz;
-
-        const arc = (refArclength?.[proj.segIdx] ?? 0) + proj.t * tlen;
+        const arc = (workingArc?.[proj.segIdx] ?? 0) + proj.t * tlen;
 
         out[i] = {
             seg_index: proj.segIdx,
+            foot_x: F.x, foot_y: F.y, foot_z: F.z,
             arclength_m: arc,
             dev_total_mm: distTotal * 1000,
             dev_perp_mm: devPerp * 1000,
             dev_lateral_mm: devLateral * 1000,
         };
     }
+
+    out._reversed = reversed;
+    out._refPath = workingRef;
+    out._refArclength = workingArc;
     return out;
 };
 
