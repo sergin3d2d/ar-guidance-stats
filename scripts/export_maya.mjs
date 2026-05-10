@@ -123,6 +123,25 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     console.log(`\n=== ${outRefName} + ${outTracedName} ===`);
 
     const refTxtContent = fs.readFileSync(refTxt, 'utf8');
+
+    // Raw .txt points — no processing at all. Exactly as the file contains them,
+    // in original row order (= file index). Use this to inspect the source data
+    // and compare against any processed version.
+    const refTxtPoints = [];
+    for (const line of refTxtContent.split('\n')) {
+        const t = line.trim();
+        if (!t || t.startsWith('#') || t.startsWith('index')) continue;
+        const parts = t.split(',');
+        if (parts.length < 4) continue;
+        refTxtPoints.push({
+            idx: parseInt(parts[0], 10),
+            x: parseFloat(parts[1]),
+            y: parseFloat(parts[2]),
+            z: parseFloat(parts[3]),
+            color: parseInt(parts[4], 10),
+        });
+    }
+
     // Smoothed reference (visual / Maya measurement target — nearest-neighbor sort).
     const refSmooth = parseReferenceTxt(refTxtContent, { smooth: true, removeOutliers: true });
     const refSmoothArc = cumulativeArclength(refSmooth.path);
@@ -171,6 +190,7 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
         };
     });
 
+    console.log(`  Reference path (RAW .txt, no processing):           ${refTxtPoints.length} pts`);
     console.log(`  Reference path (smoothed, Maya measurement target): ${refSmooth.path.length} pts, arc ${refSmoothArc[refSmoothArc.length - 1].toFixed(3)} m`);
     console.log(`  Reference path (raw / unsmoothed):                  ${refRaw.path.length} pts`);
     console.log(`  Reference path (analytical, dashboard X axis):      ${refAnalytical.points.length} pts, arc ${refAnalytical.arclength[refAnalytical.arclength.length - 1].toFixed(3)} m`);
@@ -190,6 +210,20 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     // --- File 1: planned reference path -------------------------------------
 
     let refScene = mayaHeader(outRefName);
+
+    refScene += '\n// --- RAW .txt points (original file, NO processing) ---\n';
+    refScene += '// Drawn as a NURBS curve in original file row order — connects rows in\n';
+    refScene += '// sequence. Per-point locators ("raw_NNNN") use the .txt file index so\n';
+    refScene += '// you can map back to specific rows in the source. Color column also kept.\n';
+    refScene += mayaTransformGroup('reference_path_txt_raw');
+    refScene += mayaNurbsCurveSegments('reference_path_txt_raw', refTxtPoints);
+
+    refScene += '\n// --- RAW .txt points as locators (named with original file index) ---\n';
+    refScene += mayaTransformGroup('reference_path_txt_raw_points');
+    refTxtPoints.forEach((p) => {
+        refScene += mayaLocator(`raw_${String(p.idx).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_txt_raw_points');
+    });
+
     refScene += '\n// --- Smoothed reference path (Maya measurement target, nearest-neighbor sort) ---\n';
     refScene += mayaTransformGroup('reference_path_smoothed');
     refScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
