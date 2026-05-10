@@ -111,7 +111,7 @@ const sortNearestNeighbor = (points, threshold = 0.015) => {
     return findPath(firstPass[validEnd] || points[0]);
 };
 
-const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3) => {
+const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, cornerCos = 0.95) => {
     let cur = points.slice();
     const corners = new Array(points.length).fill(false);
     for (let i = 0; i < points.length; i++) {
@@ -129,7 +129,7 @@ const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3) => {
         const l2 = Math.hypot(v2.x, v2.y, v2.z);
         if (l1 > 0.001 && l2 > 0.001) {
             const dot = (v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / (l1 * l2);
-            if (dot < 0.70) corners[i] = true;
+            if (dot < cornerCos) corners[i] = true;
         }
     }
     for (let it = 0; it < iterations; it++) {
@@ -146,6 +146,38 @@ const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3) => {
         cur = nxt;
     }
     return cur;
+};
+
+// Remove spike/fly-away points: a point whose direction vectors to its
+// neighbors nearly reverse (cos angle < cosThreshold) is a path that doubled
+// back to a stray point. Iterate until stable.
+//
+// Default cosThreshold = -0.3 catches reversals > ~107°; preserves real
+// corners up to that angle.
+const removeOutlierSpikes = (points, cosThreshold = -0.3) => {
+    let pts = points.slice();
+    let changed = true;
+    let iters = 0;
+    while (changed && iters++ < 10) {
+        changed = false;
+        const keep = new Array(pts.length).fill(true);
+        for (let i = 1; i < pts.length - 1; i++) {
+            const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+            if (a.x === null || b.x === null || c.x === null) continue;
+            const v1x = b.x - a.x, v1y = b.y - a.y, v1z = b.z - a.z;
+            const v2x = c.x - b.x, v2y = c.y - b.y, v2z = c.z - b.z;
+            const l1 = Math.hypot(v1x, v1y, v1z);
+            const l2 = Math.hypot(v2x, v2y, v2z);
+            if (l1 < 1e-9 || l2 < 1e-9) continue;
+            const cos = (v1x * v2x + v1y * v2y + v1z * v2z) / (l1 * l2);
+            if (cos < cosThreshold) {
+                keep[i] = false;
+                changed = true;
+            }
+        }
+        pts = pts.filter((_, i) => keep[i]);
+    }
+    return pts;
 };
 
 const clusterMilestones = (points, threshold = 0.003) => {
@@ -168,7 +200,12 @@ const clusterMilestones = (points, threshold = 0.003) => {
     return clusters.map((c) => ({ x: c.x, y: c.y, z: c.z }));
 };
 
-export const parseReferenceTxt = (txt) => {
+export const parseReferenceTxt = (txt, options = {}) => {
+    const {
+        smooth = true,           // apply corner-preserving smoothing pass
+        smoothCornerCos = 0.95,  // dot threshold below which a point is treated as a corner (preserved)
+        removeOutliers = true,   // strip spike/fly-away points after sorting
+    } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
     const milestonesRaw = [];
@@ -185,9 +222,10 @@ export const parseReferenceTxt = (txt) => {
     }
     const downsampled = downsampleVoxel(pathRaw, 0.001);
     const sorted = sortNearestNeighbor(downsampled);
-    const smoothed = smoothPathPreserveCorners(sorted, 10, 3);
+    const cleaned = removeOutliers ? removeOutlierSpikes(sorted) : sorted;
+    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, 10, 3, smoothCornerCos) : cleaned;
     const milestones = clusterMilestones(milestonesRaw, 0.003);
-    return { path: smoothed, milestones };
+    return { path: finalPath, milestones };
 };
 
 // Cumulative arclength along a (possibly broken) path. Same length as input.

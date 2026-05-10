@@ -121,7 +121,9 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     console.log(`\n=== ${outRefName} + ${outTracedName} ===`);
 
     const refTxtContent = fs.readFileSync(refTxt, 'utf8');
-    const ref = parseReferenceTxt(refTxtContent);
+    // Maya export: keep outlier removal, but skip smoothing so sharp corners
+    // stay sharp for visual evaluation.
+    const ref = parseReferenceTxt(refTxtContent, { smooth: false, removeOutliers: true });
 
     const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, tracedFile), 'utf8'));
     const v = tracedJson.payload.find((p) => p.name === 'SurfaceDrawing')?.values;
