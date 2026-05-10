@@ -431,17 +431,23 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         const totalArc = refDist[refDist.length - 1] || 0;
 
                         // Project each JSON milestone onto the (possibly flipped) reference
-                        // polyline to find its arclength position on the X axis.
-                        const milestoneEntries = milestonesForCond.map((m) => {
-                            let bestIdx = 0, bestSq = Infinity;
-                            for (let j = 0; j < refPath.length; j++) {
-                                const r = refPath[j];
-                                if (r.x === null) continue;
-                                const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
-                                if (d < bestSq) { bestSq = d; bestIdx = j; }
-                            }
-                            return { arc: refDist[bestIdx] || 0, label: m.label };
-                        });
+                        // polyline to find its arclength position. Then renumber by arclength
+                        // so the chart labels read M01, M02, ... left-to-right along the X axis.
+                        // The original sphere ID (matches Maya / 3D Spatial Trace) is kept in
+                        // the tooltip via customdata.
+                        const milestoneEntries = milestonesForCond
+                            .map((m) => {
+                                let bestIdx = 0, bestSq = Infinity;
+                                for (let j = 0; j < refPath.length; j++) {
+                                    const r = refPath[j];
+                                    if (r.x === null) continue;
+                                    const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
+                                    if (d < bestSq) { bestSq = d; bestIdx = j; }
+                                }
+                                return { arc: refDist[bestIdx] || 0, sphereLabel: m.label, sphereName: m.name };
+                            })
+                            .sort((a, b) => a.arc - b.arc)
+                            .map((m, i) => ({ ...m, label: `M${String(i + 1).padStart(2, '0')}` }));
 
                         // Convex/concave background regions (heuristic: above/below ref Y midline)
                         const bgShapes = [];
@@ -511,7 +517,9 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             }];
                         });
 
-                        // Landmark markers along the X axis at y=0
+                        // Landmark markers along the X axis at y=0. Alternating
+                        // textposition top/bottom reduces overlap when adjacent
+                        // milestones land at similar arclengths.
                         if (milestoneEntries.length > 0) {
                             traces.push({
                                 x: milestoneEntries.map((m) => m.arc),
@@ -519,10 +527,11 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                 type: 'scatter', mode: 'markers+text',
                                 marker: { size: 9, color: 'rgba(0,0,0,0.6)', symbol: 'diamond-open' },
                                 text: milestoneEntries.map((m) => m.label),
-                                textposition: 'top center',
+                                textposition: milestoneEntries.map((_, i) => i % 2 === 0 ? 'top center' : 'bottom center'),
                                 textfont: { size: 10, color: 'rgba(0,0,0,0.7)' },
                                 name: 'Reference milestones',
-                                hovertemplate: 'milestone %{text}<br>arc=%{x:.3f} m<extra></extra>',
+                                customdata: milestoneEntries.map((m) => `${m.sphereLabel}${m.sphereName ? ' / ' + m.sphereName : ''}`),
+                                hovertemplate: 'chart label %{text}<br>sphere id %{customdata}<br>arc=%{x:.3f} m<extra></extra>',
                             });
                         }
 
@@ -530,7 +539,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Each user point projects onto the closest segment of the planned path; pairs (arclength, lateral deviation) are then sorted by arclength so the line follows the path. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}Y = lateral deviation in mm (in-surface, signed). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
+                                    Each user point projects onto the closest segment of the planned path; pairs (arclength, lateral deviation) are sorted by arclength so the line follows the path. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones along the path, renumbered M01…M{milestoneEntries.length} in arclength order so they read left-to-right (hover for original sphere ID). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
