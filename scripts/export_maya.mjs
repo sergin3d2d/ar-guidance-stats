@@ -20,6 +20,7 @@ const {
     parseReferenceTxt,
     getSurfaceTransform,
     transformDrawPoints,
+    transformPointToLocal,
     cumulativeArclength,
     measureAlignmentOffset,
 } = await import('../src/utils/task2Spatial.js');
@@ -99,18 +100,58 @@ const orderMilestonesByArclength = (refPoints, refDistances, milestones) => {
     return withArc.map((m, i) => ({ ...m, label: `M${i + 1}` }));
 };
 
-// --- File 1: planned reference path -----------------------------------------
+// --- Load planned reference (from .txt) and the chosen traced trial --------
 
 const visibleTxt = fs.readFileSync(VISIBLE_TXT, 'utf8');
 const visibleRef = parseReferenceTxt(visibleTxt);
-const visibleArc = cumulativeArclength(visibleRef.path);
-const milestones = orderMilestonesByArclength(visibleRef.path, visibleArc, visibleRef.milestones);
 
-console.log(`Reference path: ${visibleRef.path.length} smoothed points (incl. line breaks)`);
-console.log(`Reference milestones (sorted by arclength along smoothed path):`);
-for (const m of milestones) {
-    console.log(`  ${m.label.padEnd(4)} arc=${m.arclength_m.toFixed(3)} m   pos=(${m.x.toFixed(3)}, ${m.y.toFixed(3)}, ${m.z.toFixed(3)})`);
+const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, TRACED_FILE), 'utf8'));
+const v = tracedJson.payload.find((p) => p.name === 'SurfaceDrawing')?.values;
+if (!v) throw new Error('Traced file has no SurfaceDrawing payload');
+
+const transform = getSurfaceTransform(v);
+const transformed = transformDrawPoints(v.all_draw_points, transform);
+const offsetMm = measureAlignmentOffset(transformed, visibleRef.path);
+
+// JSON-defined milestones — the experiment's actual measurement targets.
+// Each entry has both planned (reference_position) and the user's recorded
+// point nearest it (closest_draw_point_position), plus the recorded distance.
+// Both are in world frame; transform to surface-local for overlay.
+const runtimeMilestones = (v.reference_point_measurements || []).map((m, i) => {
+    const planned = transformPointToLocal({
+        position_x: m.reference_position_x,
+        position_y: m.reference_position_y,
+        position_z: m.reference_position_z,
+    }, transform);
+    const userHit = transformPointToLocal({
+        position_x: m.closest_draw_point_position_x,
+        position_y: m.closest_draw_point_position_y,
+        position_z: m.closest_draw_point_position_z,
+    }, transform);
+    return {
+        label: `M${String(i + 1).padStart(2, '0')}`,
+        name: m.reference_name,
+        planned,
+        userHit,
+        distance_mm: m.distance_mm,
+        closest_draw_point_index: m.closest_draw_point_index,
+    };
+});
+
+console.log(`Reference path (.txt smoothed): ${visibleRef.path.length} points`);
+console.log(`Traced trial: ${TRACED_FILE}`);
+console.log(`  ${v.all_draw_points.length} draw points → ${transformed.length} registered points`);
+console.log(`  Centroid offset from reference: ${offsetMm.toFixed(2)} mm (in surface-local frame)`);
+console.log(`\nMilestone pairs (from JSON reference_point_measurements):`);
+console.log(`  label  name    planned (m)                       user hit (m)                       dist (mm)`);
+for (const m of runtimeMilestones) {
+    const p = m.planned, u = m.userHit;
+    console.log(`  ${m.label}  ${(m.name || '?').padEnd(7)} (${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)})  (${u.x.toFixed(3)}, ${u.y.toFixed(3)}, ${u.z.toFixed(3)})  ${m.distance_mm.toFixed(2)}`);
 }
+
+if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
+
+// --- File 1: planned reference path -----------------------------------------
 
 let refScene = mayaHeader('P01_visible_reference.ma');
 refScene += '\n// --- Reference path (NURBS curves, one per continuous segment) ---\n';
@@ -124,29 +165,16 @@ visibleRef.path.forEach((p, i) => {
     refScene += mayaLocator(`pt_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_points');
 });
 
-refScene += '\n// --- Milestones (sorted by arclength along the smoothed path) ---\n';
-refScene += mayaTransformGroup('milestones');
-for (const m of milestones) {
-    refScene += mayaLocator(m.label, m.x, m.y, m.z, 'milestones');
+refScene += '\n// --- Planned milestones (from JSON reference_position) ---\n';
+refScene += mayaTransformGroup('milestones_planned');
+for (const m of runtimeMilestones) {
+    refScene += mayaLocator(m.label, m.planned.x, m.planned.y, m.planned.z, 'milestones_planned');
 }
 
-if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
 fs.writeFileSync(path.join(OUT_DIR, 'P01_visible_reference.ma'), refScene, 'utf8');
 console.log(`\n✓ Wrote ${path.join(OUT_DIR, 'P01_visible_reference.ma')}  (${(refScene.length / 1024).toFixed(1)} KB)`);
 
 // --- File 2: registered traced path -----------------------------------------
-
-const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, TRACED_FILE), 'utf8'));
-const v = tracedJson.payload.find((p) => p.name === 'SurfaceDrawing')?.values;
-if (!v) throw new Error('Traced file has no SurfaceDrawing payload');
-
-const transform = getSurfaceTransform(v);
-const transformed = transformDrawPoints(v.all_draw_points, transform);
-const offsetMm = measureAlignmentOffset(transformed, visibleRef.path);
-
-console.log(`\nTraced trial: ${TRACED_FILE}`);
-console.log(`  ${v.all_draw_points.length} draw points → ${transformed.length} registered points`);
-console.log(`  Centroid offset from reference: ${offsetMm.toFixed(2)} mm (in surface-local frame)`);
 
 // Insert nulls at line breaks so the curve breaks into separate segments.
 const tracedSegmented = [];
@@ -168,14 +196,19 @@ transformed.forEach((p, i) => {
     tracedScene += mayaLocator(`tp_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'traced_path_points');
 });
 
-tracedScene += '\n// --- Reference milestones (same labels as P01_visible_reference.ma) ---\n';
-tracedScene += mayaTransformGroup('milestones');
-for (const m of milestones) {
-    tracedScene += mayaLocator(m.label, m.x, m.y, m.z, 'milestones');
+tracedScene += '\n// --- User-hit milestones (closest_draw_point_position from JSON) ---\n';
+tracedScene += '// Same labels as P01_visible_reference.ma — the distance between the\n';
+tracedScene += '// matching M-locators is the recorded per-milestone deviation (also stored\n';
+tracedScene += '// in JSON reference_point_measurements[i].distance_mm).\n';
+tracedScene += mayaTransformGroup('milestones_user_hit');
+for (const m of runtimeMilestones) {
+    tracedScene += mayaLocator(m.label, m.userHit.x, m.userHit.y, m.userHit.z, 'milestones_user_hit');
 }
 
 fs.writeFileSync(path.join(OUT_DIR, 'P01_OnScreen_Visible_traced.ma'), tracedScene, 'utf8');
 console.log(`✓ Wrote ${path.join(OUT_DIR, 'P01_OnScreen_Visible_traced.ma')}  (${(tracedScene.length / 1024).toFixed(1)} KB)`);
 
-console.log('\nOpen both files in Maya, set unit to meters, and import one into the other to overlay.');
-console.log('Milestone locators carry the same labels (M1, M2, …) as the dashboard charts.');
+console.log('\nOpen both in Maya (units = meters) and File→Import one into the other.');
+console.log('M01..M{n} in milestones_planned (reference file) pair with M01..M{n} in');
+console.log('milestones_user_hit (traced file). Distance between paired locators');
+console.log('= per-milestone deviation in meters.');
