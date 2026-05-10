@@ -23,10 +23,11 @@ const obstructRefMilestones = obstructRefData.milestones;
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
 
-// For each clustered milestone, find its arclength along the smoothed reference.
-const milestoneArclengths = (refPoints, refDistances, milestones) => {
-    const out = [];
-    for (const m of milestones) {
+// Order milestones by arclength along the smoothed reference path.
+// Returns one record per milestone with { x, y, z, arclength_m, label } where
+// label is "M1", "M2", ... so the same numbering is shared by every chart.
+const orderMilestonesByArclength = (refPoints, refDistances, milestones) => {
+    const withArc = milestones.map((m) => {
         let bestIdx = 0, bestSq = Infinity;
         for (let j = 0; j < refPoints.length; j++) {
             const r = refPoints[j];
@@ -34,13 +35,16 @@ const milestoneArclengths = (refPoints, refDistances, milestones) => {
             const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
             if (d < bestSq) { bestSq = d; bestIdx = j; }
         }
-        out.push(refDistances[bestIdx] || 0);
-    }
-    return out.sort((a, b) => a - b);
+        return { x: m.x, y: m.y, z: m.z, arclength_m: refDistances[bestIdx] || 0 };
+    });
+    withArc.sort((a, b) => a.arclength_m - b.arclength_m);
+    return withArc.map((m, i) => ({ ...m, label: `M${i + 1}` }));
 };
 
-const visibleMilestoneArcs = milestoneArclengths(visibleRefPoints, visibleRefDistances, visibleRefMilestones);
-const obstructMilestoneArcs = milestoneArclengths(obstructRefPoints, obstructRefDistances, obstructRefMilestones);
+const visibleMilestonesOrdered = orderMilestonesByArclength(visibleRefPoints, visibleRefDistances, visibleRefMilestones);
+const obstructMilestonesOrdered = orderMilestonesByArclength(obstructRefPoints, obstructRefDistances, obstructRefMilestones);
+const visibleMilestoneArcs = visibleMilestonesOrdered.map((m) => m.arclength_m);
+const obstructMilestoneArcs = obstructMilestonesOrdered.map((m) => m.arclength_m);
 
 const calculateYMid = (points) => {
     const ys = points.map((p) => p.y).filter((y) => y !== null && y !== undefined);
@@ -619,11 +623,15 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                             showlegend: true
                                         },
                                         {
-                                            x: visibleRefMilestones.map(p => p.x),
-                                            y: visibleRefMilestones.map(p => p.y),
-                                            z: visibleRefMilestones.map(p => p.z),
-                                            type: 'scatter3d', mode: 'markers', name: 'Reference Milestones (Visible)',
-                                            marker: { size: 6, color: 'cyan', symbol: 'circle' },
+                                            x: visibleMilestonesOrdered.map(p => p.x),
+                                            y: visibleMilestonesOrdered.map(p => p.y),
+                                            z: visibleMilestonesOrdered.map(p => p.z),
+                                            type: 'scatter3d', mode: 'markers+text', name: 'Reference Milestones (Visible)',
+                                            marker: { size: 7, color: 'cyan', symbol: 'circle', line: { color: '#003a44', width: 1 } },
+                                            text: visibleMilestonesOrdered.map(p => p.label),
+                                            textposition: 'top center',
+                                            textfont: { size: 11, color: '#003a44' },
+                                            hovertemplate: '%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
                                             legendgroup: 'RefVis',
                                             showlegend: false
                                         }
@@ -639,11 +647,15 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                             showlegend: true
                                         },
                                         {
-                                            x: obstructRefMilestones.map(p => p.x),
-                                            y: obstructRefMilestones.map(p => p.y),
-                                            z: obstructRefMilestones.map(p => p.z),
-                                            type: 'scatter3d', mode: 'markers', name: 'Reference Milestones (Obstructed)',
-                                            marker: { size: 6, color: 'cyan', symbol: 'circle' },
+                                            x: obstructMilestonesOrdered.map(p => p.x),
+                                            y: obstructMilestonesOrdered.map(p => p.y),
+                                            z: obstructMilestonesOrdered.map(p => p.z),
+                                            type: 'scatter3d', mode: 'markers+text', name: 'Reference Milestones (Obstructed)',
+                                            marker: { size: 7, color: 'cyan', symbol: 'circle', line: { color: '#003a44', width: 1 } },
+                                            text: obstructMilestonesOrdered.map(p => p.label),
+                                            textposition: 'top center',
+                                            textfont: { size: 11, color: '#003a44' },
+                                            hovertemplate: '%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
                                             legendgroup: 'RefObs',
                                             showlegend: false
                                         }
