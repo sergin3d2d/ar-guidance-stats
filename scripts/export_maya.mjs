@@ -33,7 +33,6 @@ const EXPORTS = [
 
 const {
     parseReferenceTxt,
-    parseReferenceTxtForAnalysis,
     getSurfaceTransform,
     transformDrawPoints,
     transformPointToLocal,
@@ -123,34 +122,9 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     console.log(`\n=== ${outRefName} + ${outTracedName} ===`);
 
     const refTxtContent = fs.readFileSync(refTxt, 'utf8');
-
-    // Raw .txt points — no processing at all. Exactly as the file contains them,
-    // in original row order (= file index). Use this to inspect the source data
-    // and compare against any processed version.
-    const refTxtPoints = [];
-    for (const line of refTxtContent.split('\n')) {
-        const t = line.trim();
-        if (!t || t.startsWith('#') || t.startsWith('index')) continue;
-        const parts = t.split(',');
-        if (parts.length < 4) continue;
-        refTxtPoints.push({
-            idx: parseInt(parts[0], 10),
-            x: parseFloat(parts[1]),
-            y: parseFloat(parts[2]),
-            z: parseFloat(parts[3]),
-            color: parseInt(parts[4], 10),
-        });
-    }
-
-    // Smoothed reference (visual / Maya measurement target — nearest-neighbor sort).
-    const refSmooth = parseReferenceTxt(refTxtContent, { smooth: true, removeOutliers: true });
+    // Original smoothed reference (default options).
+    const refSmooth = parseReferenceTxt(refTxtContent);
     const refSmoothArc = cumulativeArclength(refSmooth.path);
-    // Cleaned but unsmoothed — useful as a side-by-side to inspect corner shape.
-    const refRaw = parseReferenceTxt(refTxtContent, { smooth: false, removeOutliers: true });
-    // Analytical reference (.txt native row order, smoothed, outlier-filtered).
-    // This is the path the dashboard's Path Deviation Profile uses for X-axis
-    // arclength. Including it lets you visually verify it covers the trace.
-    const refAnalytical = parseReferenceTxtForAnalysis(refTxtContent);
 
     const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, tracedFile), 'utf8'));
     const v = tracedJson.payload.find((p) => p.name === 'SurfaceDrawing')?.values;
@@ -190,66 +164,22 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
         };
     });
 
-    console.log(`  Reference path (RAW .txt, no processing):           ${refTxtPoints.length} pts`);
-    console.log(`  Reference path (smoothed, Maya measurement target): ${refSmooth.path.length} pts, arc ${refSmoothArc[refSmoothArc.length - 1].toFixed(3)} m`);
-    console.log(`  Reference path (raw / unsmoothed):                  ${refRaw.path.length} pts`);
-    console.log(`  Reference path (analytical, dashboard X axis):      ${refAnalytical.points.length} pts, arc ${refAnalytical.arclength[refAnalytical.arclength.length - 1].toFixed(3)} m`);
+    console.log(`  Reference path (smoothed): ${refSmooth.path.length} pts, arc ${refSmoothArc[refSmoothArc.length - 1].toFixed(3)} m`);
     console.log(`  Traced trial: ${tracedFile}`);
     console.log(`  ${v.all_draw_points.length} draw points → ${transformed.length} registered points`);
     console.log(`  Centroid offset from reference: ${offsetMm.toFixed(2)} mm (in surface-local frame)`);
-    console.log(`  Direction auto-flipped: ${deviations._reversed ? 'YES (user traced reference in reverse)' : 'no'}`);
     const validDevs = deviations.filter((d) => d && d.dev_lateral_mm !== null);
     console.log(`  Lateral deviation: n=${validDevs.length}  rms=${Math.sqrt(validDevs.reduce((s, d) => s + d.dev_lateral_mm ** 2, 0) / validDevs.length).toFixed(2)} mm  max|=${Math.max(...validDevs.map((d) => Math.abs(d.dev_lateral_mm))).toFixed(2)} mm`);
-    console.log(`\n  Milestone pairs (from JSON reference_point_measurements):`);
-    console.log(`    label  name           planned (m)                         user hit (m)                         dist (mm)`);
-    for (const m of runtimeMilestones) {
-        const p = m.planned, u = m.userHit;
-        console.log(`    ${m.label}    ${(m.name || '?').padEnd(13)} (${p.x.toFixed(3)}, ${p.y.toFixed(3)}, ${p.z.toFixed(3)})    (${u.x.toFixed(3)}, ${u.y.toFixed(3)}, ${u.z.toFixed(3)})    ${m.distance_mm.toFixed(2)}`);
-    }
 
     // --- File 1: planned reference path -------------------------------------
 
     let refScene = mayaHeader(outRefName);
 
-    refScene += '\n// --- RAW .txt points (original file, NO processing) ---\n';
-    refScene += '// Drawn as a NURBS curve in original file row order — connects rows in\n';
-    refScene += '// sequence. Per-point locators ("raw_NNNN") use the .txt file index so\n';
-    refScene += '// you can map back to specific rows in the source. Color column also kept.\n';
-    refScene += mayaTransformGroup('reference_path_txt_raw');
-    refScene += mayaNurbsCurveSegments('reference_path_txt_raw', refTxtPoints);
-
-    refScene += '\n// --- RAW .txt points as locators (named with original file index) ---\n';
-    refScene += mayaTransformGroup('reference_path_txt_raw_points');
-    refTxtPoints.forEach((p) => {
-        refScene += mayaLocator(`raw_${String(p.idx).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_txt_raw_points');
-    });
-
-    refScene += '\n// --- Smoothed reference path (Maya measurement target, nearest-neighbor sort) ---\n';
+    refScene += '\n// --- Smoothed reference path (the original visual reference) ---\n';
     refScene += mayaTransformGroup('reference_path_smoothed');
     refScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
 
-    refScene += '\n// --- Raw cleaned reference path (no smoothing — preserves sharp corners) ---\n';
-    refScene += mayaTransformGroup('reference_path_raw');
-    refScene += mayaNurbsCurveSegments('reference_path_raw', refRaw.path);
-
-    refScene += '\n// --- Analytical reference path (.txt native row order, smoothed + outlier-filtered) ---\n';
-    refScene += '// This is what the dashboard Path Deviation Profile uses for X-axis arclength.\n';
-    refScene += '// Walking this curve from start to end traces the planned path in true order;\n';
-    refScene += '// distinct spheres get distinct arclength positions on the chart.\n';
-    refScene += mayaTransformGroup('reference_path_analytical');
-    refScene += mayaNurbsCurveSegments('reference_path_analytical', refAnalytical.points);
-
-    refScene += '\n// --- Analytical reference points as locators (path-walk order) ---\n';
-    refScene += '// Naming: ana_NNNN where NNNN is the index in walking order.\n';
-    refScene += '// Sequential indices should be physically adjacent (mostly < 5mm apart).\n';
-    refScene += '// Null break points in the polyline are skipped here.\n';
-    refScene += mayaTransformGroup('reference_path_analytical_points');
-    refAnalytical.points.forEach((p, i) => {
-        if (p.x === null) return;
-        refScene += mayaLocator(`ana_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_analytical_points');
-    });
-
-    refScene += '\n// --- Smoothed reference path points (locators, nearest-neighbor order) ---\n';
+    refScene += '\n// --- Smoothed reference path points (locators, walk order) ---\n';
     refScene += mayaTransformGroup('reference_path_points');
     refSmooth.path.forEach((p, i) => {
         if (p.x === null) return;
@@ -280,10 +210,6 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     tracedScene += '\n// --- Smoothed reference path (Maya measurement target) ---\n';
     tracedScene += mayaTransformGroup('reference_path_smoothed');
     tracedScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
-
-    tracedScene += '\n// --- Analytical reference path (dashboard X axis source) ---\n';
-    tracedScene += mayaTransformGroup('reference_path_analytical');
-    tracedScene += mayaNurbsCurveSegments('reference_path_analytical', refAnalytical.points);
 
     tracedScene += '\n// --- Traced path (NURBS curves, one per continuous stroke) ---\n';
     tracedScene += mayaTransformGroup('traced_path');
