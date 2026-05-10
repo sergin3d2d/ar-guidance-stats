@@ -242,8 +242,10 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     refScene += '\n// --- Analytical reference points as locators (path-walk order) ---\n';
     refScene += '// Naming: ana_NNNN where NNNN is the index in walking order.\n';
     refScene += '// Sequential indices should be physically adjacent (mostly < 5mm apart).\n';
+    refScene += '// Null break points in the polyline are skipped here.\n';
     refScene += mayaTransformGroup('reference_path_analytical_points');
     refAnalytical.points.forEach((p, i) => {
+        if (p.x === null) return;
         refScene += mayaLocator(`ana_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_analytical_points');
     });
 
