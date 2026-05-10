@@ -5,6 +5,7 @@ import {
     parseReferenceTxt,
     getSurfaceTransform,
     transformDrawPoints,
+    transformPointToLocal,
     cumulativeArclength,
     computeDeviations,
     detectAndFlipDirection,
@@ -24,28 +25,9 @@ const obstructRefMilestones = obstructRefData.milestones;
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
 
-// Order milestones by arclength along the smoothed reference path.
-// Returns one record per milestone with { x, y, z, arclength_m, label } where
-// label is "M1", "M2", ... so the same numbering is shared by every chart.
-const orderMilestonesByArclength = (refPoints, refDistances, milestones) => {
-    const withArc = milestones.map((m) => {
-        let bestIdx = 0, bestSq = Infinity;
-        for (let j = 0; j < refPoints.length; j++) {
-            const r = refPoints[j];
-            if (r.x === null) continue;
-            const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
-            if (d < bestSq) { bestSq = d; bestIdx = j; }
-        }
-        return { x: m.x, y: m.y, z: m.z, arclength_m: refDistances[bestIdx] || 0 };
-    });
-    withArc.sort((a, b) => a.arclength_m - b.arclength_m);
-    return withArc.map((m, i) => ({ ...m, label: `M${i + 1}` }));
-};
-
-const visibleMilestonesOrdered = orderMilestonesByArclength(visibleRefPoints, visibleRefDistances, visibleRefMilestones);
-const obstructMilestonesOrdered = orderMilestonesByArclength(obstructRefPoints, obstructRefDistances, obstructRefMilestones);
-const visibleMilestoneArcs = visibleMilestonesOrdered.map((m) => m.arclength_m);
-const obstructMilestoneArcs = obstructMilestonesOrdered.map((m) => m.arclength_m);
+// Note: milestones are now sourced per-trial from JSON reference_point_measurements
+// (not the .txt clustered red dots) so the dashboard uses the same M01..M15
+// numbering as the Maya export. See buildJsonMilestones inside Task2Analytics.
 
 const calculateYMid = (points) => {
     const ys = points.map((p) => p.y).filter((y) => y !== null && y !== undefined);
@@ -165,6 +147,43 @@ const Task2Analytics = ({ participantData, participantId }) => {
         });
         return transformDrawPoints(s.data.allDrawPoints || [], transform);
     });
+
+    // Build JSON-derived milestones (15 per trial) in surface-local frame, using
+    // the JSON's natural sphere-ID order so M01..M15 mean the same thing here
+    // and in the Maya export. Picks the first available trial per condition.
+    const buildJsonMilestones = (seriesList) => {
+        const firstWithData = seriesList.find((s) => {
+            const i = filteredSeries.indexOf(s);
+            return transformedSeries[i] && transformedSeries[i].some((p) => !p.is_line_break);
+        });
+        if (!firstWithData) return [];
+        const refMeasurements = firstWithData.data.referencePointMeasurements || [];
+        const transform = getSurfaceTransform({
+            surface_position_x: firstWithData.data.surfacePositionX,
+            surface_position_y: firstWithData.data.surfacePositionY,
+            surface_position_z: firstWithData.data.surfacePositionZ,
+            surface_rotation_quat_x: firstWithData.data.surfaceRotationQuatX,
+            surface_rotation_quat_y: firstWithData.data.surfaceRotationQuatY,
+            surface_rotation_quat_z: firstWithData.data.surfaceRotationQuatZ,
+            surface_rotation_quat_w: firstWithData.data.surfaceRotationQuatW,
+        });
+        return refMeasurements.map((m, i) => {
+            const planned = transformPointToLocal({
+                position_x: m.reference_position_x,
+                position_y: m.reference_position_y,
+                position_z: m.reference_position_z,
+            }, transform);
+            return {
+                x: planned.x,
+                y: planned.y,
+                z: planned.z,
+                label: `M${String(i + 1).padStart(2, '0')}`,
+                name: m.reference_name,
+            };
+        });
+    };
+    const visibleJsonMilestones = buildJsonMilestones(filteredSeries.filter((s) => s.condition === 'Visible'));
+    const obstructJsonMilestones = buildJsonMilestones(filteredSeries.filter((s) => s.condition === 'Obstructed'));
 
     // One-shot alignment warning: surface-local user trace vs reference path.
     // Logs to console (dev) — UI banner could be added later if it's a recurring issue.
@@ -390,7 +409,8 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
                         const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
                         const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
-                        const milestonesOrdered = conditionName === 'Visible' ? visibleMilestonesOrdered : obstructMilestonesOrdered;
+                        // Use JSON-derived milestones (same M01..M15 numbering as Maya).
+                        const milestonesForCond = conditionName === 'Visible' ? visibleJsonMilestones : obstructJsonMilestones;
 
                         // Detect direction once per condition using the first available series
                         // with data, so all series in this panel share the same X axis orientation.
@@ -410,8 +430,9 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }
                         const totalArc = refDist[refDist.length - 1] || 0;
 
-                        // Recompute milestone arclengths against the directional ref
-                        const milestoneArcs = milestonesOrdered.map((m) => {
+                        // Project each JSON milestone onto the (possibly flipped) reference
+                        // polyline to find its arclength position on the X axis.
+                        const milestoneEntries = milestonesForCond.map((m) => {
                             let bestIdx = 0, bestSq = Infinity;
                             for (let j = 0; j < refPath.length; j++) {
                                 const r = refPath[j];
@@ -419,7 +440,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                 const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
                                 if (d < bestSq) { bestSq = d; bestIdx = j; }
                             }
-                            return refDist[bestIdx] || 0;
+                            return { arc: refDist[bestIdx] || 0, label: m.label };
                         });
 
                         // Convex/concave background regions (heuristic: above/below ref Y midline)
@@ -453,10 +474,10 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }
 
                         // Vertical milestone lines
-                        for (let mi = 0; mi < milestoneArcs.length; mi++) {
+                        for (const me of milestoneEntries) {
                             bgShapes.push({
                                 type: 'line', xref: 'x', yref: 'paper',
-                                x0: milestoneArcs[mi], x1: milestoneArcs[mi], y0: 0, y1: 1,
+                                x0: me.arc, x1: me.arc, y0: 0, y1: 1,
                                 line: { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' },
                                 layer: 'below',
                             });
@@ -491,13 +512,13 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         });
 
                         // Landmark markers along the X axis at y=0
-                        if (milestoneArcs.length > 0) {
+                        if (milestoneEntries.length > 0) {
                             traces.push({
-                                x: milestoneArcs,
-                                y: milestoneArcs.map(() => 0),
+                                x: milestoneEntries.map((m) => m.arc),
+                                y: milestoneEntries.map(() => 0),
                                 type: 'scatter', mode: 'markers+text',
                                 marker: { size: 9, color: 'rgba(0,0,0,0.6)', symbol: 'diamond-open' },
-                                text: milestoneArcs.map((_, i) => `M${i + 1}`),
+                                text: milestoneEntries.map((m) => m.label),
                                 textposition: 'top center',
                                 textfont: { size: 10, color: 'rgba(0,0,0,0.7)' },
                                 name: 'Reference milestones',
@@ -608,42 +629,26 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             return acc;
                         }, {})
                     ).map(([conditionName, seriesGroup], cIdx) => {
-                        // Direction-aware milestone labels: re-order milestones along
-                        // the (possibly flipped) reference so M1, M2, ... follow the
-                        // user's actual traversal direction. Same flip logic as the
-                        // deviation profile.
+                        // Reference path direction-flip (matches deviation profile / Maya).
                         const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
                         const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
-                        const milestonesSrc = conditionName === 'Visible' ? visibleRefMilestones : obstructRefMilestones;
                         const firstWithData = seriesGroup.find((s) => {
                             const i = filteredSeries.indexOf(s);
                             return transformedSeries[i] && transformedSeries[i].some((p) => !p.is_line_break);
                         });
-                        let dirRefPath = refPointsRaw, dirRefDist = refDistRaw;
+                        let dirRefPath = refPointsRaw;
                         if (firstWithData) {
                             const dirIdx = filteredSeries.indexOf(firstWithData);
                             const flip = detectAndFlipDirection(transformedSeries[dirIdx], refPointsRaw, refDistRaw);
                             dirRefPath = flip.refPath;
-                            dirRefDist = flip.refArclength;
                         }
-                        const milestonesOrderedDir = milestonesSrc
-                            .map((m) => {
-                                let bestIdx = 0, bestSq = Infinity;
-                                for (let j = 0; j < dirRefPath.length; j++) {
-                                    const r = dirRefPath[j];
-                                    if (r.x === null) continue;
-                                    const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
-                                    if (d < bestSq) { bestSq = d; bestIdx = j; }
-                                }
-                                return { x: m.x, y: m.y, z: m.z, arclength_m: dirRefDist[bestIdx] || 0 };
-                            })
-                            .sort((a, b) => a.arclength_m - b.arclength_m)
-                            .map((m, i) => ({ ...m, label: `M${i + 1}` }));
+                        // Milestones: same JSON-derived M01..M15 set as the deviation profile and Maya.
+                        const milestonesForCond3D = conditionName === 'Visible' ? visibleJsonMilestones : obstructJsonMilestones;
 
                         return (
                         <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                             <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>3D Spatial Trace: {conditionName}</h4>
-                            <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>Aligned relative to surface. Milestone IDs follow user traversal direction.</p>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>Aligned relative to surface. M01..M15 = experimental tracking spheres in JSON order (matches Maya export).</p>
                             <Plot
                                 data={[
                                     ...seriesGroup.flatMap(s => {
@@ -684,19 +689,20 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                             legendgroup: `Ref${conditionName}`,
                                             showlegend: true
                                         },
-                                        {
-                                            x: milestonesOrderedDir.map(p => p.x),
-                                            y: milestonesOrderedDir.map(p => p.y),
-                                            z: milestonesOrderedDir.map(p => p.z),
+                                        ...(milestonesForCond3D.length > 0 ? [{
+                                            x: milestonesForCond3D.map(p => p.x),
+                                            y: milestonesForCond3D.map(p => p.y),
+                                            z: milestonesForCond3D.map(p => p.z),
                                             type: 'scatter3d', mode: 'markers+text', name: `Reference Milestones (${conditionName})`,
                                             marker: { size: 7, color: 'cyan', symbol: 'circle', line: { color: '#003a44', width: 1 } },
-                                            text: milestonesOrderedDir.map(p => p.label),
+                                            text: milestonesForCond3D.map(p => p.label),
                                             textposition: 'top center',
                                             textfont: { size: 11, color: '#003a44' },
-                                            hovertemplate: '%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
+                                            hovertemplate: '%{text}<br>%{customdata}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
+                                            customdata: milestonesForCond3D.map(p => p.name || ''),
                                             legendgroup: `Ref${conditionName}`,
                                             showlegend: false
-                                        }
+                                        }] : []),
                                     ] : [])
                                 ]}
                                 layout={{
