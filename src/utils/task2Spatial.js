@@ -587,22 +587,29 @@ export const computeDeviations = (transformedPoints, refPoints, refArclength, op
     return out;
 };
 
-// Walk along the reference path; for each ref point, find the closest user
-// (traced) point and compute the deviation vector. Returns one record per ref
-// point in arclength order. The chart plots these directly — naturally
-// monotonic along X, one Y per X, no sort or windowed-projection ambiguity.
+// Walk along the reference path; for each ref point, find the closest point
+// on the USER trace POLYLINE (segment-projection, not vertex). This avoids
+// many ref points projecting to the same user vertex when the user trace is
+// sparser than the reference. The foot point distributes smoothly along the
+// user polyline, eliminating the "fan" artefact in the Maya measurements.
 //
 // Decomposition at each ref point R_i:
 //   T = local tangent of the reference polyline (averaged inbound+outbound)
-//   N = user-point surface normal (orthogonalised vs T) if available
+//   N = surface normal at the matched user vertex (orthogonalised vs T)
 //   B = T × N
-//   dev_lateral_mm = (U − R) · B   (in-surface, signed; the meaningful error)
-//   dev_total_mm   = |U − R|
-//
-// Returns null fields for break points in the reference path.
+//   dev_lateral_mm = (Foot − R) · B   (in-surface, signed)
+//   dev_total_mm   = |Foot − R|
 export const computeRefPathDeviations = (refPath, refArclength, transformedUserPoints) => {
     const out = new Array(refPath.length);
-    const validUser = transformedUserPoints.filter((p) => !p.is_line_break);
+    // Build user-trace segments (consecutive non-break point pairs)
+    const userSegs = [];
+    for (let j = 0; j < transformedUserPoints.length - 1; j++) {
+        const a = transformedUserPoints[j];
+        const b = transformedUserPoints[j + 1];
+        if (b.is_line_break) continue;     // pen lift between j and j+1
+        if (a.is_line_break && j > 0) continue;
+        userSegs.push({ aIdx: j, bIdx: j + 1, a, b });
+    }
 
     const buildEmpty = (i) => ({
         arclength_m: refArclength?.[i] ?? 0,
@@ -611,7 +618,7 @@ export const computeRefPathDeviations = (refPath, refArclength, transformedUserP
         user_x: null, user_y: null, user_z: null,
     });
 
-    if (validUser.length === 0) {
+    if (userSegs.length === 0) {
         for (let i = 0; i < refPath.length; i++) out[i] = buildEmpty(i);
         return out;
     }
@@ -620,19 +627,35 @@ export const computeRefPathDeviations = (refPath, refArclength, transformedUserP
         const r = refPath[i];
         if (r.x === null) { out[i] = buildEmpty(i); continue; }
 
-        // 3D nearest user point
-        let bestIdx = 0, bestSq = Infinity;
-        for (let j = 0; j < validUser.length; j++) {
-            const u = validUser[j];
-            const dx = r.x - u.x, dy = r.y - u.y, dz = r.z - u.z;
+        // Find closest user-trace SEGMENT (point on polyline)
+        let bestSq = Infinity;
+        let bestFoot = null;
+        let bestSegIdx = 0;
+        for (let s = 0; s < userSegs.length; s++) {
+            const { a, b } = userSegs[s];
+            const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+            const segLenSq = abx * abx + aby * aby + abz * abz;
+            if (segLenSq < 1e-12) continue;
+            const arx = r.x - a.x, ary = r.y - a.y, arz = r.z - a.z;
+            let t = (arx * abx + ary * aby + arz * abz) / segLenSq;
+            if (t < 0) t = 0; else if (t > 1) t = 1;
+            const fx = a.x + t * abx, fy = a.y + t * aby, fz = a.z + t * abz;
+            const dx = r.x - fx, dy = r.y - fy, dz = r.z - fz;
             const d = dx * dx + dy * dy + dz * dz;
-            if (d < bestSq) { bestSq = d; bestIdx = j; }
+            if (d < bestSq) {
+                bestSq = d;
+                bestFoot = { x: fx, y: fy, z: fz, t };
+                bestSegIdx = s;
+            }
         }
-        const u = validUser[bestIdx];
-        const dxU = u.x - r.x, dyU = u.y - r.y, dzU = u.z - r.z;
+        if (!bestFoot) { out[i] = buildEmpty(i); continue; }
+
+        const seg = userSegs[bestSegIdx];
+        const closerVertex = bestFoot.t < 0.5 ? seg.a : seg.b;
+        const dxU = bestFoot.x - r.x, dyU = bestFoot.y - r.y, dzU = bestFoot.z - r.z;
         const distTotal = Math.sqrt(bestSq);
 
-        // Local tangent (average of inbound + outbound segment directions)
+        // Local tangent of REFERENCE polyline (averaged inbound + outbound)
         let tx = 0, ty = 0, tz = 0;
         const prev = i > 0 ? refPath[i - 1] : null;
         const next = i < refPath.length - 1 ? refPath[i + 1] : null;
@@ -649,11 +672,11 @@ export const computeRefPathDeviations = (refPath, refArclength, transformedUserP
         const tl = Math.hypot(tx, ty, tz) || 1;
         tx /= tl; ty /= tl; tz /= tl;
 
-        // Normal: prefer user point's captured surface normal
+        // Normal: use the closer user vertex's captured surface normal
         let nx, ny, nz;
-        if (u.nx !== null && u.ny !== null && u.nz !== null) {
-            const nL = Math.hypot(u.nx, u.ny, u.nz) || 1;
-            nx = u.nx / nL; ny = u.ny / nL; nz = u.nz / nL;
+        if (closerVertex.nx !== null && closerVertex.ny !== null && closerVertex.nz !== null) {
+            const nL = Math.hypot(closerVertex.nx, closerVertex.ny, closerVertex.nz) || 1;
+            nx = closerVertex.nx / nL; ny = closerVertex.ny / nL; nz = closerVertex.nz / nL;
             const dotTN = nx * tx + ny * ty + nz * tz;
             nx -= dotTN * tx; ny -= dotTN * ty; nz -= dotTN * tz;
             const renorm = Math.hypot(nx, ny, nz) || 1;
@@ -667,7 +690,6 @@ export const computeRefPathDeviations = (refPath, refArclength, transformedUserP
             nx /= renorm; ny /= renorm; nz /= renorm;
         }
 
-        // Binormal = T × N
         const bx = ty * nz - tz * ny;
         const by = tz * nx - tx * nz;
         const bz = tx * ny - ty * nx;
@@ -677,9 +699,9 @@ export const computeRefPathDeviations = (refPath, refArclength, transformedUserP
             arclength_m: refArclength?.[i] ?? 0,
             dev_lateral_mm: devLateral * 1000,
             dev_total_mm: distTotal * 1000,
-            closest_user_idx: bestIdx,
+            closest_user_idx: bestFoot.t < 0.5 ? seg.aIdx : seg.bIdx,
             ref_x: r.x, ref_y: r.y, ref_z: r.z,
-            user_x: u.x, user_y: u.y, user_z: u.z,
+            user_x: bestFoot.x, user_y: bestFoot.y, user_z: bestFoot.z,
         };
     }
     return out;
