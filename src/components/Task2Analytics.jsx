@@ -449,27 +449,11 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             const color = getColor(s.method, s.condition);
                             return [{
                                 x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.perp),
-                                type: 'scatter', mode: 'lines', name: `${s.name} ⊥ (perpendicular)`,
+                                y: pairs.map((p) => p.lateral),
+                                type: 'scatter', mode: 'lines', name: s.name,
                                 line: { color, width: 1.6 },
                                 legendgroup: s.name,
-                                hovertemplate: 'arc=%{x:.3f} m<br>⊥ perp=%{y:.2f} mm<extra></extra>',
-                            }, {
-                                x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.lateral),
-                                type: 'scatter', mode: 'lines', name: `${s.name} ⇄ lateral`,
-                                line: { color, width: 1.2, dash: 'dash' },
-                                legendgroup: s.name,
-                                showlegend: false,
-                                hovertemplate: 'arc=%{x:.3f} m<br>⇄ lateral=%{y:.2f} mm<extra></extra>',
-                            }, {
-                                x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.total),
-                                type: 'scatter', mode: 'lines', name: `${s.name} |total|`,
-                                line: { color, width: 1, dash: 'dot' },
-                                legendgroup: s.name,
-                                showlegend: false,
-                                hovertemplate: 'arc=%{x:.3f} m<br>|total|=%{y:.2f} mm<extra></extra>',
+                                hovertemplate: 'arc=%{x:.3f} m<br>lateral=%{y:.2f} mm<extra></extra>',
                             }];
                         });
 
@@ -492,7 +476,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Each user point is projected onto the planned path. Solid = perpendicular (off-surface, +outward / −inward). Dashed = lateral (in-surface, sideways from path direction). Dotted = absolute 3D distance. Vertical lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference path; max ≈ {totalArc.toFixed(2)} m.
+                                    Each user point is projected onto the planned path. Y = lateral deviation in mm — in-surface, sideways from the path direction (+ one side / − the other). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference path; total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
@@ -500,7 +484,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                         ...layoutTheme,
                                         shapes: bgShapes,
                                         xaxis: { title: `Arclength along Reference Path (m) — total ${totalArc.toFixed(3)} m` },
-                                        yaxis: { title: 'Deviation (mm)', zeroline: true, zerolinecolor: 'rgba(0,0,0,0.3)' },
+                                        yaxis: { title: 'Lateral deviation (mm)', zeroline: true, zerolinecolor: 'rgba(0,0,0,0.3)' },
                                         legend: { orientation: 'h', y: -0.2 },
                                     }}
                                     useResizeHandler={true} style={{ width: '100%', height: '380px' }}

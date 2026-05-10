@@ -426,30 +426,25 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
             const median = (arr) => arr.length % 2 ? arr[(arr.length - 1) / 2] : 0.5 * (arr[arr.length / 2 - 1] + arr[arr.length / 2]);
             const rms = (arr) => Math.sqrt(mean(arr.map((x) => x * x)));
 
-            // Per-trial summary
+            // Per-trial summary — lateral (signed, in-surface) is the meaningful
+            // error; the tool stays on the surface so perpendicular is noise.
             if (settings.task2.deviationSummary) {
-                const valid = deviations.filter((d) => d && d.dev_total_mm !== null);
+                const valid = deviations.filter((d) => d && d.dev_lateral_mm !== null);
                 if (valid.length > 0) {
-                    const totals = valid.map((d) => d.dev_total_mm);
-                    const perps = valid.map((d) => d.dev_perp_mm);
                     const laterals = valid.map((d) => d.dev_lateral_mm);
-                    const sortedT = totals.slice().sort((a, b) => a - b);
+                    const absLat = laterals.map(Math.abs);
+                    const sortedAbs = absLat.slice().sort((a, b) => a - b);
                     summaryRows.push({
                         ...baseKeys,
                         n_points: valid.length,
-                        dev_total_mean_mm: mean(totals),
-                        dev_total_median_mm: median(sortedT),
-                        dev_total_rms_mm: rms(totals),
-                        dev_total_max_mm: Math.max(...totals),
-                        dev_total_std_mm: std(totals),
-                        dev_perp_mean_mm: mean(perps),
-                        dev_perp_rms_mm: rms(perps),
-                        dev_perp_signed_mean_mm: mean(perps),
-                        dev_lateral_mean_mm: mean(laterals),
-                        dev_lateral_rms_mm: rms(laterals),
                         dev_lateral_signed_mean_mm: mean(laterals),
-                        frac_within_2mm: totals.filter((x) => x <= 2).length / totals.length,
-                        frac_within_5mm: totals.filter((x) => x <= 5).length / totals.length,
+                        dev_lateral_abs_mean_mm: mean(absLat),
+                        dev_lateral_abs_median_mm: median(sortedAbs),
+                        dev_lateral_rms_mm: rms(laterals),
+                        dev_lateral_max_abs_mm: Math.max(...absLat),
+                        dev_lateral_std_mm: std(laterals),
+                        frac_within_2mm: absLat.filter((x) => x <= 2).length / absLat.length,
+                        frac_within_5mm: absLat.filter((x) => x <= 5).length / absLat.length,
                     });
                 }
             }
@@ -459,17 +454,17 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                 const nBins = Math.max(2, settings.task2.deviationProfileBins | 0);
                 const totalArc = ref.arclength[ref.arclength.length - 1] || 1;
                 const bins = Array.from({ length: nBins }, () => ({
-                    totalSum: 0, totalMax: 0, perpSum: 0, latSum: 0, n: 0,
+                    latSum: 0, absLatSum: 0, absLatMax: 0, n: 0,
                 }));
                 for (const d of deviations) {
-                    if (!d || d.dev_total_mm === null) continue;
+                    if (!d || d.dev_lateral_mm === null) continue;
                     let binIdx = Math.floor((d.arclength_m / totalArc) * nBins);
                     if (binIdx >= nBins) binIdx = nBins - 1;
                     if (binIdx < 0) binIdx = 0;
-                    bins[binIdx].totalSum += d.dev_total_mm;
-                    bins[binIdx].totalMax = Math.max(bins[binIdx].totalMax, d.dev_total_mm);
-                    bins[binIdx].perpSum += d.dev_perp_mm;
+                    const absLat = Math.abs(d.dev_lateral_mm);
                     bins[binIdx].latSum += d.dev_lateral_mm;
+                    bins[binIdx].absLatSum += absLat;
+                    bins[binIdx].absLatMax = Math.max(bins[binIdx].absLatMax, absLat);
                     bins[binIdx].n += 1;
                 }
                 bins.forEach((b, i) => {
@@ -479,10 +474,9 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         bin_index: i,
                         bin_path_distance_m: ((i + 0.5) / nBins) * totalArc,
                         bin_n_points: b.n,
-                        dev_total_mean_mm: b.totalSum / b.n,
-                        dev_total_max_mm: b.totalMax,
-                        dev_perp_mean_mm: b.perpSum / b.n,
-                        dev_lateral_mean_mm: b.latSum / b.n,
+                        dev_lateral_signed_mean_mm: b.latSum / b.n,
+                        dev_lateral_abs_mean_mm: b.absLatSum / b.n,
+                        dev_lateral_abs_max_mm: b.absLatMax,
                     });
                 });
             }
@@ -501,8 +495,6 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         y_local_mm: p.y * 1000,
                         z_local_mm: p.z * 1000,
                         ref_arclength_m: d?.arclength_m ?? '',
-                        dev_total_mm: d?.dev_total_mm ?? '',
-                        dev_perp_mm: d?.dev_perp_mm ?? '',
                         dev_lateral_mm: d?.dev_lateral_mm ?? '',
                     });
                 }
@@ -673,12 +665,14 @@ const buildReadme = (settings, tables) => {
         lines.push('');
     }
     if (tables.task2_deviation_summary) {
-        lines.push('task2_deviation_summary.csv — per-trial 3D-deviation stats (mean / RMS / max / std / signed mean / banded fractions).');
-        lines.push('  Deviations computed from registered (surface-local) draw points vs the reference path.');
+        lines.push('task2_deviation_summary.csv — per-trial lateral-deviation stats (signed mean / abs mean / RMS / max / banded fractions).');
+        lines.push('  Lateral = in-surface, sideways from the planned path direction. Sign indicates which side of the path.');
+        lines.push('  Computed from each registered (surface-local) draw point projected onto the closest segment of the reference polyline.');
         lines.push('');
     }
     if (tables.task2_deviation_profile) {
-        lines.push(`task2_deviation_profile.csv — per-trial deviation binned into ${settings.task2.deviationProfileBins} equal-width bins along reference arclength.`);
+        lines.push(`task2_deviation_profile.csv — per-trial lateral deviation binned into ${settings.task2.deviationProfileBins} equal-width bins along reference arclength.`);
+        lines.push('  Each bin carries signed mean, abs mean, and abs max for that arclength slice.');
         lines.push('');
     }
     if (tables.task2_drawpoints) {
