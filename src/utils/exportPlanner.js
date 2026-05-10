@@ -18,9 +18,9 @@ import obstructTxtRaw from '../../Obstruct.txt?raw';
 // --- Default settings -------------------------------------------------------
 
 export const DEFAULT_EXPORT_SETTINGS = {
-    steady: {
-        enabled: true,
-        seconds: 2.5,
+    provenance: {
+        includeSourceFile: false,
+        includeTimestamp: false,
     },
     task1: {
         include: true,
@@ -64,7 +64,31 @@ export const DEFAULT_EXPORT_SETTINGS = {
         dropArOnlyForOnScreen: true,  // B5 and C4 are PCUE-Q items only valid for AR conditions
         arOnlyKeys: 'B5,C4',
         computeNasaTlxOverall: true,
+        parseVisionScore: true,
     },
+};
+
+// --- Vision score parser ----------------------------------------------------
+// "16/100" → with-glasses denom = 16, without-glasses denom = 100, uses_glasses = true
+//             (i.e. participant sees 20/16 with glasses, 20/100 without)
+// "20"     → without-glasses denom = 20, uses_glasses = false (single value, no glasses)
+// ""       → all NA
+export const parseVisionScore = (raw) => {
+    const out = { with_glasses: '', without_glasses: '', uses_glasses: '' };
+    if (raw === null || raw === undefined) return out;
+    const s = String(raw).trim();
+    if (s === '') return out;
+    if (s.includes('/')) {
+        const [a, b] = s.split('/').map((x) => parseInt(x.trim(), 10));
+        if (!isNaN(a)) out.with_glasses = a;
+        if (!isNaN(b)) out.without_glasses = b;
+        out.uses_glasses = 1;
+    } else {
+        const v = parseInt(s, 10);
+        if (!isNaN(v)) out.without_glasses = v;
+        out.uses_glasses = 0;
+    }
+    return out;
 };
 
 // --- Utilities --------------------------------------------------------------
@@ -96,15 +120,26 @@ const parseGuideList = (str) => {
     );
 };
 
-const subtractSteady = (val, settings) => {
-    if (val === null || val === undefined) return null;
-    if (!settings.steady.enabled) return val;
-    return val - settings.steady.seconds;
+// Build the standard key block prepended to every task row. The provenance
+// columns (source_file, timestamp) are off by default — the analyst can opt
+// back in if needed. condition_order is always included.
+const baseKeysFor = (meta, conditionOrder, settings) => {
+    const order = conditionOrder[meta.pid]?.[meta.conditionLabel] ?? '';
+    const base = {
+        pid: meta.pid,
+        device_raw: meta.deviceRaw,
+        condition: meta.conditionLabel,
+        obstruction: meta.obstruction,
+        condition_order: order,
+    };
+    if (settings.provenance.includeSourceFile) base.source_file = meta.filename;
+    if (settings.provenance.includeTimestamp) base.timestamp = meta.timestamp;
+    return base;
 };
 
 // --- participants.csv -------------------------------------------------------
 
-const buildParticipantsTable = (rawFiles, csvFilesList, conditionOrder) => {
+const buildParticipantsTable = (rawFiles, csvFilesList, conditionOrder, settings) => {
     const participants = {};
 
     for (const rf of rawFiles) {
@@ -139,6 +174,18 @@ const buildParticipantsTable = (rawFiles, csvFilesList, conditionOrder) => {
         }
     }
 
+    if (settings?.questionnaires?.parseVisionScore) {
+        for (const pid of Object.keys(participants)) {
+            const raw = participants[pid].pre_vision_test_score;
+            if (raw !== undefined) {
+                const parsed = parseVisionScore(raw);
+                participants[pid].vision_with_glasses = parsed.with_glasses;
+                participants[pid].vision_without_glasses = parsed.without_glasses;
+                participants[pid].vision_uses_glasses = parsed.uses_glasses;
+            }
+        }
+    }
+
     for (const pid of Object.keys(participants)) {
         const order = conditionOrder[pid] || {};
         participants[pid].order_AR_VST = order['AR-VST'] ?? '';
@@ -166,7 +213,7 @@ const buildTask1Table = (rawFiles, conditionOrder, settings) => {
         const guideData = rf.json?.payload?.find((p) => p.name === 'GuideMeasurement')?.values;
         if (!guideData) continue;
         const measurements = guideData.all_measurements || [];
-        const order = conditionOrder[meta.pid]?.[meta.conditionLabel] ?? '';
+        const steadyTime = guideData.steady_time_required_seconds ?? null;
 
         for (const m of measurements) {
             const guide1Based = (m.guide_index || 0) + 1;
@@ -178,13 +225,7 @@ const buildTask1Table = (rawFiles, conditionOrder, settings) => {
             }
 
             const row = {
-                pid: meta.pid,
-                device_raw: meta.deviceRaw,
-                condition: meta.conditionLabel,
-                obstruction: meta.obstruction,
-                condition_order: order,
-                source_file: meta.filename,
-                timestamp: meta.timestamp,
+                ...baseKeysFor(meta, conditionOrder, settings),
                 group_index: m.group_index,
             };
 
@@ -208,8 +249,9 @@ const buildTask1Table = (rawFiles, conditionOrder, settings) => {
             }
             if (settings.task1.rotationError) row.rotation_error_degrees = m.rotation_error_degrees;
             if (settings.task1.placementTime) {
-                row.placement_time_seconds = subtractSteady(m.placement_time_seconds, settings);
-                row.steady_time_subtracted_seconds = settings.steady.enabled ? settings.steady.seconds : 0;
+                // Raw value — analyst applies steady_time_seconds correction in R if desired.
+                row.placement_time_seconds = m.placement_time_seconds;
+                if (steadyTime !== null) row.steady_time_seconds = steadyTime;
             }
             if (settings.task1.attempts) row.attempts = m.attempts;
             if (settings.task1.measurementTime) row.measurement_time_seconds = m.measurement_time_seconds;
@@ -241,18 +283,14 @@ const buildTask3Table = (rawFiles, conditionOrder, settings) => {
         if (!meta || meta.taskNum !== 3) continue;
         const axisData = rf.json?.payload?.find((p) => p.name === 'AxisMeasurement')?.values;
         if (!axisData) continue;
-        const order = conditionOrder[meta.pid]?.[meta.conditionLabel] ?? '';
         const axes = axisData.all_axes_measurements || [];
+        const steadyTime = axisData.steady_duration_seconds
+            ?? axisData.steady_time_required_seconds
+            ?? null;
 
         for (const a of axes) {
             const row = {
-                pid: meta.pid,
-                device_raw: meta.deviceRaw,
-                condition: meta.conditionLabel,
-                obstruction: meta.obstruction,
-                condition_order: order,
-                source_file: meta.filename,
-                timestamp: meta.timestamp,
+                ...baseKeysFor(meta, conditionOrder, settings),
                 axis_index: settings.task3.axisIndex1Based ? (a.axis_index || 0) + 1 : a.axis_index,
                 axis_name: a.axis_name,
             };
@@ -262,8 +300,9 @@ const buildTask3Table = (rawFiles, conditionOrder, settings) => {
             if (settings.task3.entryAttempts) row.entry_attempts = a.entry_attempts;
             if (settings.task3.endAttempts) row.end_attempts = a.end_attempts;
             if (settings.task3.axisTotalTime) {
-                row.axis_total_time_seconds = subtractSteady(a.axis_total_time_seconds, settings);
-                row.steady_time_subtracted_seconds = settings.steady.enabled ? settings.steady.seconds : 0;
+                // Raw value — analyst applies steady_time_seconds correction in R if desired.
+                row.axis_total_time_seconds = a.axis_total_time_seconds;
+                if (steadyTime !== null) row.steady_time_seconds = steadyTime;
             }
             if (settings.task3.positions) {
                 row.entry_x = a.measured_entry_position_x;
@@ -333,18 +372,8 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
         if (!meta || meta.taskNum !== 2) continue;
         const v = rf.json?.payload?.find((p) => p.name === 'SurfaceDrawing')?.values;
         if (!v) continue;
-        const order = conditionOrder[meta.pid]?.[meta.conditionLabel] ?? '';
         conditionsUsed.add(meta.obstruction);
-
-        const baseKeys = {
-            pid: meta.pid,
-            device_raw: meta.deviceRaw,
-            condition: meta.conditionLabel,
-            obstruction: meta.obstruction,
-            condition_order: order,
-            source_file: meta.filename,
-            timestamp: meta.timestamp,
-        };
+        const baseKeys = baseKeysFor(meta, conditionOrder, settings);
 
         // Trial-level row
         if (settings.task2.trials) {
@@ -609,16 +638,15 @@ const buildReadme = (settings, tables) => {
     lines.push('  condition          normalized condition label (AR-OST / AR-VST / On-Screen)');
     lines.push('  obstruction        Visible / Obstruct');
     lines.push('  condition_order    1, 2 or 3 — rank by earliest filename timestamp per participant');
-    lines.push('  source_file        original JSON filename (for provenance)');
-    lines.push('  timestamp          ISO datetime parsed from the filename');
+    if (settings.provenance.includeSourceFile) lines.push('  source_file        original JSON filename (provenance)');
+    if (settings.provenance.includeTimestamp) lines.push('  timestamp          ISO datetime parsed from the filename (provenance)');
     lines.push('');
-    if (settings.steady.enabled) {
-        lines.push(`Steady-position correction: ${settings.steady.seconds} s subtracted from`);
-        lines.push('  - task1_placing.placement_time_seconds');
-        lines.push('  - task3_reaching.axis_total_time_seconds');
-        lines.push('  steady_time_subtracted_seconds column records the magnitude per row.');
-        lines.push('');
-    }
+    lines.push('Time fields are RAW (no correction applied). The steady_time_seconds column,');
+    lines.push('when present, records the steady-position hold required by the task — subtract');
+    lines.push('it in your analysis if you want corrected times.');
+    lines.push('  task1_placing.placement_time_seconds   - steady_time_seconds');
+    lines.push('  task3_reaching.axis_total_time_seconds - steady_time_seconds');
+    lines.push('');
     if (tables.task1_placing) {
         lines.push('task1_placing.csv — one row per (participant × condition × group × guide).');
         if (settings.task1.applySubtypeSplit) {
@@ -661,6 +689,14 @@ const buildReadme = (settings, tables) => {
         lines.push('task3_reaching.csv — one row per (participant × condition × axis).');
         lines.push('');
     }
+    if (tables.participants && settings.questionnaires.parseVisionScore) {
+        lines.push('participants.csv — vision_test_score parsed into:');
+        lines.push('  vision_with_glasses      denominator of "20/X" with glasses (NA if single value)');
+        lines.push('  vision_without_glasses   denominator of "20/X" without glasses');
+        lines.push('  vision_uses_glasses      1 = two values reported (had glasses), 0 = single value (no glasses)');
+        lines.push('  Raw value preserved as pre_vision_test_score.');
+        lines.push('');
+    }
     if (tables.questionnaires) {
         lines.push('questionnaires.csv — long-format survey responses.');
         if (settings.questionnaires.dropArOnlyForOnScreen) {
@@ -684,7 +720,7 @@ export const buildExportArchive = async (rawFiles, csvFilesList, settings) => {
     const conditionOrder = deriveConditionOrder(rawFiles);
     const tables = {};
 
-    const participantsTbl = buildParticipantsTable(rawFiles, csvFilesList, conditionOrder);
+    const participantsTbl = buildParticipantsTable(rawFiles, csvFilesList, conditionOrder, settings);
     if (participantsTbl.rows.length > 0) tables.participants = participantsTbl;
 
     const t1 = buildTask1Table(rawFiles, conditionOrder, settings);

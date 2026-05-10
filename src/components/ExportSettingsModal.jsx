@@ -118,20 +118,19 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                         Produces a zip of long-format CSVs (one row per trial / landmark / axis / item) plus a README. Suitable for direct ingestion into R.
                     </p>
 
-                    <Section title="Steady-position correction">
+                    <Section title="Provenance columns (off by default)">
                         <Toggle
-                            label="Subtract steady-position hold from Task 1 placement_time and Task 3 axis_total_time"
-                            value={settings.steady.enabled}
-                            onChange={update('steady.enabled')}
+                            label="Include source_file column"
+                            hint="Original JSON filename on every row. Useful for debugging, noisy for analysis."
+                            value={settings.provenance.includeSourceFile}
+                            onChange={update('provenance.includeSourceFile')}
                         />
-                        {settings.steady.enabled && (
-                            <NumField
-                                label="Seconds subtracted"
-                                value={settings.steady.seconds}
-                                onChange={update('steady.seconds')}
-                                step={0.1}
-                            />
-                        )}
+                        <Toggle
+                            label="Include timestamp column"
+                            hint="ISO datetime parsed from the filename. condition_order already encodes session order."
+                            value={settings.provenance.includeTimestamp}
+                            onChange={update('provenance.includeTimestamp')}
+                        />
                     </Section>
 
                     <Section title="Task 1 — Placing">
@@ -140,7 +139,7 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                             <div style={{ paddingLeft: '24px' }}>
                                 <Toggle label="position_error_mm" value={t1.positionError} onChange={update('task1.positionError')} />
                                 <Toggle label="rotation_error_degrees" value={t1.rotationError} onChange={update('task1.rotationError')} />
-                                <Toggle label="placement_time_seconds (corrected)" value={t1.placementTime} onChange={update('task1.placementTime')} />
+                                <Toggle label="placement_time_seconds (raw, plus steady_time_seconds)" value={t1.placementTime} onChange={update('task1.placementTime')} />
                                 <Toggle label="attempts" value={t1.attempts} onChange={update('task1.attempts')} />
                                 <Toggle label="guide_index as 1-based" value={t1.guideIndex1Based} onChange={update('task1.guideIndex1Based')} />
                                 <Toggle label="position_error vector components (x/y/z)" value={t1.positionErrorVector} onChange={update('task1.positionErrorVector')} />
@@ -216,7 +215,7 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                                 <Toggle label="end_deviation_mm" value={t3.endDeviation} onChange={update('task3.endDeviation')} />
                                 <Toggle label="entry_attempts" value={t3.entryAttempts} onChange={update('task3.entryAttempts')} />
                                 <Toggle label="end_attempts" value={t3.endAttempts} onChange={update('task3.endAttempts')} />
-                                <Toggle label="axis_total_time_seconds (corrected)" value={t3.axisTotalTime} onChange={update('task3.axisTotalTime')} />
+                                <Toggle label="axis_total_time_seconds (raw, plus steady_time_seconds)" value={t3.axisTotalTime} onChange={update('task3.axisTotalTime')} />
                                 <Toggle label="axis_index as 1-based" value={t3.axisIndex1Based} onChange={update('task3.axisIndex1Based')} />
                                 <Toggle label="measured & original entry/end positions" value={t3.positions} onChange={update('task3.positions')} />
                             </div>
@@ -245,6 +244,12 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                                     label="Compute NASA-TLX overall_mean (per pid × condition)"
                                     value={q.computeNasaTlxOverall}
                                     onChange={update('questionnaires.computeNasaTlxOverall')}
+                                />
+                                <Toggle
+                                    label="Parse vision_test_score into glasses / no-glasses columns"
+                                    hint='"16/100" → with glasses=16, without=100, uses_glasses=1. Single value (e.g. "20") → without=20, uses_glasses=0. Raw value preserved.'
+                                    value={q.parseVisionScore}
+                                    onChange={update('questionnaires.parseVisionScore')}
                                 />
                             </div>
                         )}
