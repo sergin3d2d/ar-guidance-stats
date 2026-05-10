@@ -469,23 +469,22 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             // and disable autoflip so each series uses the same orientation.
                             const deviations = computeDeviations(transformed, refPath, refDist, { autoFlipDirection: false });
 
-                            // Time-ordered: walk in array order (= recording order). No re-sort.
-                            const xs = [], ys = [];
-                            for (let i = 0; i < deviations.length; i++) {
-                                const d = deviations[i];
-                                if (!d || d.dev_lateral_mm === null) {
-                                    xs.push(null); ys.push(null); // creates a gap in the line at line breaks
-                                    continue;
-                                }
-                                xs.push(d.arclength_m);
-                                ys.push(d.dev_lateral_mm);
+                            // Sort by arclength so the line is monotonic along the path.
+                            // Where the user traced the same arclength multiple times (back-and-forth
+                            // strokes), the line just wiggles vertically at that x — much more readable
+                            // than connecting time-adjacent points across the whole chart.
+                            const pairs = [];
+                            for (const d of deviations) {
+                                if (!d || d.dev_lateral_mm === null) continue;
+                                pairs.push({ x: d.arclength_m, y: d.dev_lateral_mm });
                             }
+                            pairs.sort((a, b) => a.x - b.x);
                             const color = getColor(s.method, s.condition);
                             return [{
-                                x: xs, y: ys,
+                                x: pairs.map((p) => p.x),
+                                y: pairs.map((p) => p.y),
                                 type: 'scatter', mode: 'lines', name: s.name,
                                 line: { color, width: 1.6 },
-                                connectgaps: false,
                                 legendgroup: s.name,
                                 hovertemplate: 'arc=%{x:.3f} m<br>lateral=%{y:.2f} mm<extra></extra>',
                             }];
@@ -510,7 +509,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    User points are walked in recording (timestamp) order; each point projects onto the closest segment of the planned path within ±15 cm of the previous match. {reversed ? 'Reference direction was auto-flipped to match user traversal. ' : ''}Y = lateral deviation in mm (in-surface, signed). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference; total path length ≈ {totalArc.toFixed(2)} m.
+                                    Each user point projects onto the closest segment of the planned path; pairs (arclength, lateral deviation) are then sorted by arclength so the line follows the path. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}Y = lateral deviation in mm (in-surface, signed). Vertical dotted lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
@@ -608,10 +607,43 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             acc[s.condition].push(s);
                             return acc;
                         }, {})
-                    ).map(([conditionName, seriesGroup], cIdx) => (
+                    ).map(([conditionName, seriesGroup], cIdx) => {
+                        // Direction-aware milestone labels: re-order milestones along
+                        // the (possibly flipped) reference so M1, M2, ... follow the
+                        // user's actual traversal direction. Same flip logic as the
+                        // deviation profile.
+                        const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
+                        const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
+                        const milestonesSrc = conditionName === 'Visible' ? visibleRefMilestones : obstructRefMilestones;
+                        const firstWithData = seriesGroup.find((s) => {
+                            const i = filteredSeries.indexOf(s);
+                            return transformedSeries[i] && transformedSeries[i].some((p) => !p.is_line_break);
+                        });
+                        let dirRefPath = refPointsRaw, dirRefDist = refDistRaw;
+                        if (firstWithData) {
+                            const dirIdx = filteredSeries.indexOf(firstWithData);
+                            const flip = detectAndFlipDirection(transformedSeries[dirIdx], refPointsRaw, refDistRaw);
+                            dirRefPath = flip.refPath;
+                            dirRefDist = flip.refArclength;
+                        }
+                        const milestonesOrderedDir = milestonesSrc
+                            .map((m) => {
+                                let bestIdx = 0, bestSq = Infinity;
+                                for (let j = 0; j < dirRefPath.length; j++) {
+                                    const r = dirRefPath[j];
+                                    if (r.x === null) continue;
+                                    const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
+                                    if (d < bestSq) { bestSq = d; bestIdx = j; }
+                                }
+                                return { x: m.x, y: m.y, z: m.z, arclength_m: dirRefDist[bestIdx] || 0 };
+                            })
+                            .sort((a, b) => a.arclength_m - b.arclength_m)
+                            .map((m, i) => ({ ...m, label: `M${i + 1}` }));
+
+                        return (
                         <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                             <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>3D Spatial Trace: {conditionName}</h4>
-                            <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>Aligned relative to surface.</p>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>Aligned relative to surface. Milestone IDs follow user traversal direction.</p>
                             <Plot
                                 data={[
                                     ...seriesGroup.flatMap(s => {
@@ -642,51 +674,27 @@ const Task2Analytics = ({ participantData, participantId }) => {
 
                                         return [lineTrace, markerTrace];
                                     }),
-                                    ...(conditionName === 'Visible' && visibleRefPoints.length > 0 ? [
+                                    ...(dirRefPath.length > 0 ? [
                                         {
-                                            x: visibleRefPoints.map(p => p.x),
-                                            y: visibleRefPoints.map(p => p.y),
-                                            z: visibleRefPoints.map(p => p.z),
-                                            type: 'scatter3d', mode: 'lines', name: 'Reference Path (Visible)',
+                                            x: dirRefPath.map(p => p.x),
+                                            y: dirRefPath.map(p => p.y),
+                                            z: dirRefPath.map(p => p.z),
+                                            type: 'scatter3d', mode: 'lines', name: `Reference Path (${conditionName})`,
                                             line: { color: 'cyan', width: 4 },
-                                            legendgroup: 'RefVis',
+                                            legendgroup: `Ref${conditionName}`,
                                             showlegend: true
                                         },
                                         {
-                                            x: visibleMilestonesOrdered.map(p => p.x),
-                                            y: visibleMilestonesOrdered.map(p => p.y),
-                                            z: visibleMilestonesOrdered.map(p => p.z),
-                                            type: 'scatter3d', mode: 'markers+text', name: 'Reference Milestones (Visible)',
+                                            x: milestonesOrderedDir.map(p => p.x),
+                                            y: milestonesOrderedDir.map(p => p.y),
+                                            z: milestonesOrderedDir.map(p => p.z),
+                                            type: 'scatter3d', mode: 'markers+text', name: `Reference Milestones (${conditionName})`,
                                             marker: { size: 7, color: 'cyan', symbol: 'circle', line: { color: '#003a44', width: 1 } },
-                                            text: visibleMilestonesOrdered.map(p => p.label),
+                                            text: milestonesOrderedDir.map(p => p.label),
                                             textposition: 'top center',
                                             textfont: { size: 11, color: '#003a44' },
                                             hovertemplate: '%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
-                                            legendgroup: 'RefVis',
-                                            showlegend: false
-                                        }
-                                    ] : []),
-                                    ...(conditionName === 'Obstructed' && obstructRefPoints.length > 0 ? [
-                                        {
-                                            x: obstructRefPoints.map(p => p.x),
-                                            y: obstructRefPoints.map(p => p.y),
-                                            z: obstructRefPoints.map(p => p.z),
-                                            type: 'scatter3d', mode: 'lines', name: 'Reference Path (Obstructed)',
-                                            line: { color: 'cyan', width: 4 },
-                                            legendgroup: 'RefObs',
-                                            showlegend: true
-                                        },
-                                        {
-                                            x: obstructMilestonesOrdered.map(p => p.x),
-                                            y: obstructMilestonesOrdered.map(p => p.y),
-                                            z: obstructMilestonesOrdered.map(p => p.z),
-                                            type: 'scatter3d', mode: 'markers+text', name: 'Reference Milestones (Obstructed)',
-                                            marker: { size: 7, color: 'cyan', symbol: 'circle', line: { color: '#003a44', width: 1 } },
-                                            text: obstructMilestonesOrdered.map(p => p.label),
-                                            textposition: 'top center',
-                                            textfont: { size: 11, color: '#003a44' },
-                                            hovertemplate: '%{text}<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>',
-                                            legendgroup: 'RefObs',
+                                            legendgroup: `Ref${conditionName}`,
                                             showlegend: false
                                         }
                                     ] : [])
@@ -704,7 +712,8 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                 useResizeHandler={true} style={{ width: '100%', height: '400px' }}
                             />
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
             </div>
         </div>
