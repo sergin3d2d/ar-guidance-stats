@@ -38,6 +38,7 @@ const {
     transformPointToLocal,
     cumulativeArclength,
     computeDeviations,
+    computeRefPathDeviations,
     measureAlignmentOffset,
 } = await import('../src/utils/task2Spatial.js');
 
@@ -139,6 +140,11 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     // window match, with auto direction flip.
     const deviations = computeDeviations(transformed, refSmooth.path, refSmoothArc);
 
+    // Reference-side measurements: for each ref point, find the closest user
+    // point. This is the algorithm the Path Deviation Profile chart uses
+    // (one Y per X = arclength).
+    const refDeviations = computeRefPathDeviations(refSmooth.path, refSmoothArc, transformed);
+
     // JSON-defined milestones — the experiment's actual measurement targets.
     // Each entry has both planned (reference_position) and the user's recorded
     // point nearest it (closest_draw_point_position), plus the recorded distance.
@@ -224,11 +230,10 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     // Measurement lines: one straight line per user point connecting the
     // user point to its matched foot on the smoothed reference path.
     // These are exactly what the dashboard chart computes.
-    tracedScene += '\n// --- Measurement lines (user point → matched foot on smoothed reference) ---\n';
+    tracedScene += '\n// --- User-side measurements (each user point → closest ref segment) ---\n';
     tracedScene += '// One degree-1 NURBS curve per user point; length = total deviation.\n';
-    tracedScene += '// Direction-aware monotonic matching (windowed search) — same algorithm\n';
-    tracedScene += '// as the Path Deviation Profile chart in the dashboard.\n';
-    tracedScene += mayaTransformGroup('measurements');
+    tracedScene += '// One line per recorded draw point — same as before.\n';
+    tracedScene += mayaTransformGroup('measurements_user_to_ref');
     let nMeas = 0;
     for (let i = 0; i < transformed.length; i++) {
         const p = transformed[i];
@@ -238,10 +243,30 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
             { x: p.x, y: p.y, z: p.z },
             { x: d.foot_x, y: d.foot_y, z: d.foot_z },
         ];
-        tracedScene += mayaNurbsCurveSegments(`meas_${String(i).padStart(4, '0')}`, segs);
+        tracedScene += mayaNurbsCurveSegments(`meas_user_${String(i).padStart(4, '0')}`, segs);
         nMeas += 1;
     }
-    console.log(`  ${nMeas} measurement lines drawn`);
+    console.log(`  ${nMeas} user-to-ref measurement lines drawn`);
+
+    tracedScene += '\n// --- Reference-side measurements (each ref point → closest user point) ---\n';
+    tracedScene += '// One degree-1 NURBS curve per reference path point. This is exactly\n';
+    tracedScene += '// the algorithm used by the Path Deviation Profile chart\n';
+    tracedScene += '// (computeRefPathDeviations: walk the ref, find closest user point at each).\n';
+    tracedScene += mayaTransformGroup('measurements_ref_to_user');
+    let nRefMeas = 0;
+    for (let i = 0; i < refSmooth.path.length; i++) {
+        const r = refSmooth.path[i];
+        const d = refDeviations[i];
+        if (!r || r.x === null) continue;
+        if (!d || d.user_x === null) continue;
+        const segs = [
+            { x: r.x, y: r.y, z: r.z },
+            { x: d.user_x, y: d.user_y, z: d.user_z },
+        ];
+        tracedScene += mayaNurbsCurveSegments(`meas_ref_${String(i).padStart(4, '0')}`, segs);
+        nRefMeas += 1;
+    }
+    console.log(`  ${nRefMeas} ref-to-user measurement lines drawn (chart algorithm)`);
 
     tracedScene += `\n// --- User-hit milestones (closest_draw_point_position from JSON) ---\n`;
     tracedScene += `// Same labels as ${outRefName} — the distance between the matching\n`;
