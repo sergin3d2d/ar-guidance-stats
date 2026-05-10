@@ -10,6 +10,7 @@ import {
     transformDrawPoints,
     cumulativeArclength,
     computeDeviations,
+    computeRefPathDeviations,
     normalizeTimestampsToSeconds,
 } from './task2Spatial';
 import visibleTxtRaw from '../../Visible.txt?raw';
@@ -416,7 +417,15 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
             const transformed = transformDrawPoints(v.all_draw_points || [], transform);
             const withTime = normalizeTimestampsToSeconds(transformed);
             const ref = getRefData(meta.obstruction);
-            const deviations = computeDeviations(withTime, ref.path, ref.arclength);
+
+            // Two algorithms with two different uses:
+            // - userDevs (user→ref): per draw-point. Used by registeredDrawPoints
+            //   so each row in task2_drawpoints carries its own foot.
+            // - refDevs (ref→user): per ref point. Same algorithm as the chart.
+            //   Used by summary + profile so exported numbers match what's
+            //   shown on the dashboard.
+            const userDevs = computeDeviations(withTime, ref.path, ref.arclength);
+            const refDevs = computeRefPathDeviations(ref.path, ref.arclength, withTime);
 
             const mean = (arr) => arr.reduce((s, x) => s + x, 0) / arr.length;
             const std = (arr) => {
@@ -426,18 +435,17 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
             const median = (arr) => arr.length % 2 ? arr[(arr.length - 1) / 2] : 0.5 * (arr[arr.length / 2 - 1] + arr[arr.length / 2]);
             const rms = (arr) => Math.sqrt(mean(arr.map((x) => x * x)));
 
-            // Per-trial summary — lateral (signed, in-surface) is the meaningful
-            // error; the tool stays on the surface so perpendicular is noise.
+            // Per-trial summary — uses ref→user so values match the chart.
             if (settings.task2.deviationSummary) {
-                const valid = deviations.filter((d) => d && d.dev_lateral_mm !== null);
+                const valid = refDevs.filter((d) => d && d.dev_lateral_mm !== null);
                 if (valid.length > 0) {
                     const laterals = valid.map((d) => d.dev_lateral_mm);
                     const absLat = laterals.map(Math.abs);
                     const sortedAbs = absLat.slice().sort((a, b) => a - b);
                     summaryRows.push({
                         ...baseKeys,
-                        n_points: valid.length,
-                        direction_reversed: deviations._reversed ? 1 : 0,
+                        n_ref_points: valid.length,
+                        direction_reversed: userDevs._reversed ? 1 : 0,
                         dev_lateral_signed_mean_mm: mean(laterals),
                         dev_lateral_abs_mean_mm: mean(absLat),
                         dev_lateral_abs_median_mm: median(sortedAbs),
@@ -450,14 +458,14 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                 }
             }
 
-            // Profile binned along reference arclength
+            // Profile binned along reference arclength — uses ref→user (chart algo).
             if (settings.task2.deviationProfile) {
                 const nBins = Math.max(2, settings.task2.deviationProfileBins | 0);
                 const totalArc = ref.arclength[ref.arclength.length - 1] || 1;
                 const bins = Array.from({ length: nBins }, () => ({
                     latSum: 0, absLatSum: 0, absLatMax: 0, n: 0,
                 }));
-                for (const d of deviations) {
+                for (const d of refDevs) {
                     if (!d || d.dev_lateral_mm === null) continue;
                     let binIdx = Math.floor((d.arclength_m / totalArc) * nBins);
                     if (binIdx >= nBins) binIdx = nBins - 1;
@@ -474,7 +482,7 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         ...baseKeys,
                         bin_index: i,
                         bin_path_distance_m: ((i + 0.5) / nBins) * totalArc,
-                        bin_n_points: b.n,
+                        bin_n_ref_points: b.n,
                         dev_lateral_signed_mean_mm: b.latSum / b.n,
                         dev_lateral_abs_mean_mm: b.absLatSum / b.n,
                         dev_lateral_abs_max_mm: b.absLatMax,
@@ -482,11 +490,11 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                 });
             }
 
-            // Registered draw points
+            // Registered draw points — naturally per-user-point, so user→ref.
             if (settings.task2.registeredDrawPoints) {
                 for (let i = 0; i < withTime.length; i++) {
                     const p = withTime[i];
-                    const d = deviations[i];
+                    const d = userDevs[i];
                     drawPointRows.push({
                         ...baseKeys,
                         point_index: p.index,
@@ -671,19 +679,22 @@ const buildReadme = (settings, tables) => {
     if (tables.task2_deviation_summary) {
         lines.push('task2_deviation_summary.csv — per-trial lateral-deviation stats (signed mean / abs mean / RMS / max / banded fractions).');
         lines.push('  Lateral = in-surface, sideways from the planned path direction. Sign indicates which side of the path.');
-        lines.push('  Computed from each registered (surface-local) draw point projected onto the closest segment of the reference polyline.');
+        lines.push('  Computed by walking the reference polyline; for each ref point, project onto the closest user-trace segment.');
+        lines.push('  Same algorithm as the dashboard Path Deviation Profile chart, so values here match what is shown there.');
         lines.push('');
     }
     if (tables.task2_deviation_profile) {
         lines.push(`task2_deviation_profile.csv — per-trial lateral deviation binned into ${settings.task2.deviationProfileBins} equal-width bins along reference arclength.`);
         lines.push('  Each bin carries signed mean, abs mean, and abs max for that arclength slice.');
+        lines.push('  Uses the same ref→user algorithm as the chart and the summary table.');
         lines.push('');
     }
     if (tables.task2_drawpoints) {
         lines.push('task2_drawpoints.csv — registered draw points in surface-local mm.');
         lines.push('  Columns x_local_mm / y_local_mm / z_local_mm are after subtracting surface_position');
         lines.push('  and rotating by the inverse of surface_rotation_quat. Units = millimeters.');
-        lines.push('  dist_to_closest_ref_mm = nearest 3D distance to the reference path point at closest_ref_index.');
+        lines.push('  ref_foot_x/y/z_mm = projection of this user point onto the closest reference segment.');
+        lines.push('  dev_lateral_mm = signed in-surface deviation at that user point.');
         lines.push('  Reference frame alignment is assumed (surface anchor = .txt authoring frame).');
         lines.push('  See reference_paths.csv for the smoothed reference geometry to overlay.');
         lines.push('');
