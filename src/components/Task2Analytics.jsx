@@ -3,7 +3,6 @@ import Plot from 'react-plotly.js';
 import { getColor } from '../utils/colors';
 import {
     parseReferenceTxt,
-    parseReferenceTxtForAnalysis,
     getSurfaceTransform,
     transformDrawPoints,
     transformPointToLocal,
@@ -27,11 +26,6 @@ const obstructRefMilestones = obstructRefData.milestones;
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
 
-// Analytical reference (.txt native row order) — used only by the Path
-// Deviation Profile chart for X-axis arclength and milestone projection.
-// Distinct spheres get distinct arclengths because the row order = path order.
-const visibleAnalytical = parseReferenceTxtForAnalysis(visibleTxtRaw);
-const obstructAnalytical = parseReferenceTxtForAnalysis(obstructTxtRaw);
 
 // Note: milestones are now sourced per-trial from JSON reference_point_measurements
 // (not the .txt clustered red dots) so the dashboard uses the same M01..M15
@@ -440,24 +434,20 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }
                         const totalArc = refDist[refDist.length - 1] || 0;
 
-                        // Project each JSON milestone onto the (possibly flipped) reference
-                        // polyline to find its arclength position. Then renumber by arclength
-                        // so the chart labels read M01, M02, ... left-to-right along the X axis.
-                        // The original sphere ID (matches Maya / 3D Spatial Trace) is kept in
-                        // the tooltip via customdata.
-                        const milestoneEntries = milestonesForCond
-                            .map((m) => {
-                                let bestIdx = 0, bestSq = Infinity;
-                                for (let j = 0; j < refPath.length; j++) {
-                                    const r = refPath[j];
-                                    if (r.x === null) continue;
-                                    const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
-                                    if (d < bestSq) { bestSq = d; bestIdx = j; }
-                                }
-                                return { arc: refDist[bestIdx] || 0, sphereLabel: m.label, sphereName: m.name };
-                            })
-                            .sort((a, b) => a.arc - b.arc)
-                            .map((m, i) => ({ ...m, label: `M${String(i + 1).padStart(2, '0')}` }));
+                        // Project each JSON milestone onto the reference polyline to find
+                        // its arclength position. With the cleaned reference, JSON sphere
+                        // order matches path order, so labels stay as the JSON sphere IDs
+                        // (M01..M15 — same as Maya and 3D Spatial Trace).
+                        const milestoneEntries = milestonesForCond.map((m) => {
+                            let bestIdx = 0, bestSq = Infinity;
+                            for (let j = 0; j < refPath.length; j++) {
+                                const r = refPath[j];
+                                if (r.x === null) continue;
+                                const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
+                                if (d < bestSq) { bestSq = d; bestIdx = j; }
+                            }
+                            return { arc: refDist[bestIdx] || 0, label: m.label, sphereName: m.name };
+                        });
 
                         // Convex/concave background regions (heuristic: above/below ref Y midline)
                         const bgShapes = [];
@@ -539,8 +529,8 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                 textposition: milestoneEntries.map((_, i) => i % 2 === 0 ? 'top center' : 'bottom center'),
                                 textfont: { size: 10, color: 'rgba(0,0,0,0.7)' },
                                 name: 'Reference milestones',
-                                customdata: milestoneEntries.map((m) => `${m.sphereLabel}${m.sphereName ? ' / ' + m.sphereName : ''}`),
-                                hovertemplate: 'chart label %{text}<br>sphere id %{customdata}<br>arc=%{x:.3f} m<extra></extra>',
+                                customdata: milestoneEntries.map((m) => m.sphereName || ''),
+                                hovertemplate: '%{text} (%{customdata})<br>arc=%{x:.3f} m<extra></extra>',
                             });
                         }
 
@@ -548,7 +538,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Walks along the smoothed reference path; for each ref point, finds the closest user-trace point and reports lateral deviation. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}X = arclength along reference (one Y per X). Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones at their projected arclengths, renumbered M01…M{milestoneEntries.length} left-to-right (hover for original sphere ID). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
+                                    Walks along the smoothed reference path; for each ref point, finds the closest user-trace point and reports lateral deviation. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}X = arclength along reference (one Y per X). Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones M01…M15 (JSON sphere IDs, same as Maya). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
