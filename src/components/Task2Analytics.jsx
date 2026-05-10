@@ -415,11 +415,10 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }, {})
                     ).map(([conditionName, seriesGroup], cIdx) => {
                         const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
-                        // Analytical reference (.txt native order) — used for the chart's
-                        // X axis arclength so distinct milestones get distinct positions.
-                        const analytical = conditionName === 'Visible' ? visibleAnalytical : obstructAnalytical;
-                        const refPointsRaw = analytical.points;
-                        const refDistRaw = analytical.arclength;
+                        // Use the original visual reference (smoothed nearest-neighbor)
+                        // for the chart X axis — same path as Maya / 3D Spatial Trace.
+                        const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
+                        const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
                         // Use JSON-derived milestones (same M01..M15 numbering as Maya).
                         const milestonesForCond = conditionName === 'Visible' ? visibleJsonMilestones : obstructJsonMilestones;
 

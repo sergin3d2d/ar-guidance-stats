@@ -111,7 +111,7 @@ const sortNearestNeighbor = (points, threshold = 0.015) => {
     return findPath(firstPass[validEnd] || points[0]);
 };
 
-const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, cornerCos = 0.85, cornerLookahead = 8) => {
+const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, cornerCos = 0.70, cornerLookahead = 4) => {
     let cur = points.slice();
     const corners = new Array(points.length).fill(false);
     for (let i = 0; i < points.length; i++) {
@@ -330,15 +330,19 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
     return { points: pointsOut, arclength };
 };
 
+// Original algorithm: voxel downsample (1mm) → nearest-neighbor sort →
+// corner-preserving smoothing (10 iterations, window 3, cornerCos 0.70).
+// No outlier removal. This is the version the user accepted as visually
+// correct in Maya at the start.
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
-        smooth = true,             // apply corner-preserving smoothing pass
-        smoothIterations = 20,     // smoothing passes (higher = smoother straight runs)
-        smoothWindow = 5,          // moving-average half-window in points
-        smoothCornerCos = 0.85,    // dot threshold below which a point is treated as a corner (preserved). Lower = fewer corners detected = more smoothing.
-        smoothCornerLookahead = 8, // how many points each side to look for the corner check. Wider = less noise-sensitive.
-        removeOutliers = true,     // strip spike/fly-away points after sorting
-        voxelMeters = 0.001,       // voxel-downsample edge length
+        smooth = true,
+        smoothIterations = 10,
+        smoothWindow = 3,
+        smoothCornerCos = 0.70,
+        smoothCornerLookahead = 4,
+        removeOutliers = false,
+        voxelMeters = 0.001,
     } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
