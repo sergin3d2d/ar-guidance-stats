@@ -200,6 +200,37 @@ const clusterMilestones = (points, threshold = 0.003) => {
     return clusters.map((c) => ({ x: c.x, y: c.y, z: c.z }));
 };
 
+// Pipeline for the analytical reference:
+//   1. Parse points in .txt row order (= path-walking order; verified)
+//   2. Order-preserving voxel downsample
+//   3. Smooth positions
+//   4. Remove outliers using local-median filter
+//      (a point that's far from the median of its order-neighbours is a
+//       fly-away — works for floating points without flagging real corners,
+//       which the median is robust to)
+//   5. Re-compute arclength on the cleaned, smoothed, ordered points
+//      ("compute IDs after smoothed and reconstructed")
+const removeOutliersByLocalMedian = (points, windowSize = 6, distThresholdMeters = 0.008) => {
+    if (points.length < 2 * windowSize + 1) return points.slice();
+    const out = [];
+    for (let i = 0; i < points.length; i++) {
+        const lo = Math.max(0, i - windowSize);
+        const hi = Math.min(points.length - 1, i + windowSize);
+        const xs = [], ys = [], zs = [];
+        for (let j = lo; j <= hi; j++) {
+            if (j === i) continue;
+            xs.push(points[j].x); ys.push(points[j].y); zs.push(points[j].z);
+        }
+        xs.sort((a, b) => a - b); ys.sort((a, b) => a - b); zs.sort((a, b) => a - b);
+        const mx = xs[Math.floor(xs.length / 2)];
+        const my = ys[Math.floor(ys.length / 2)];
+        const mz = zs[Math.floor(zs.length / 2)];
+        const dx = points[i].x - mx, dy = points[i].y - my, dz = points[i].z - mz;
+        if (Math.hypot(dx, dy, dz) <= distThresholdMeters) out.push(points[i]);
+    }
+    return out;
+};
+
 // Analytical reference: ordered points + arclength using the .txt file's
 // native row order, which IS the path-walking order for these data files
 // (verified: median row-to-row distance 0.5mm). No nearest-neighbor sort,
@@ -211,11 +242,13 @@ const clusterMilestones = (points, threshold = 0.003) => {
 // parseReferenceTxt (nearest-neighbor + smoothed for visual continuity).
 export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
     const {
-        voxelMeters = 0.002,        // light voxel collapse to remove duplicate samples
-        smoothIterations = 6,       // simple moving-average smoothing (no corner detection)
-        smoothWindow = 3,           // moving-average half-window
-        strokeBreakMeters = 0.05,   // distance above which a row jump is treated as a stroke break
-                                    // (excluded from arclength, not from the points list)
+        voxelMeters = 0.002,            // light voxel collapse to remove duplicate samples
+        smoothIterations = 6,           // simple moving-average smoothing (no corner detection)
+        smoothWindow = 3,               // moving-average half-window
+        outlierWindow = 6,              // half-window for local-median outlier check
+        outlierThresholdMeters = 0.008, // distance from local median above which a point is a fly-away
+        strokeBreakMeters = 0.05,       // row-to-row distance above which a jump is treated as a stroke break
+                                        // (excluded from arclength)
     } = options;
     if (!txt) return { points: [], arclength: [] };
 
@@ -228,8 +261,7 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
         raw.push({ x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
     }
 
-    // Order-preserving voxel downsample (collapses contiguous near-duplicates,
-    // preserves the file's native walking order).
+    // Order-preserving voxel downsample
     const downsampled = (() => {
         const out = [];
         let currentKey = null;
@@ -250,10 +282,7 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
         return out;
     })();
 
-    // Simple moving-average smoothing — corner-preservation isn't needed here
-    // because we only use these points for arclength + closest-user search,
-    // not for rendering. Light smoothing removes sample-level jitter that
-    // would inflate the arclength.
+    // Smooth positions (simple moving average — order-preserving)
     let pts = downsampled;
     for (let iter = 0; iter < smoothIterations; iter++) {
         const next = [];
@@ -267,8 +296,10 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
         pts = next;
     }
 
+    // Outlier removal — drop floating points that don't sit on the trace
+    pts = removeOutliersByLocalMedian(pts, outlierWindow, outlierThresholdMeters);
+
     // Cumulative arclength, excluding jumps that look like stroke breaks
-    // (so the path length reflects the painted line, not the pen-up moves).
     const arclength = [0];
     let total = 0;
     for (let i = 1; i < pts.length; i++) {
