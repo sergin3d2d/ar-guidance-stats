@@ -10,18 +10,21 @@ import Task2Analytics from './components/Task2Analytics';
 import Task3Analytics from './components/Task3Analytics';
 import SurveyAnalytics from './components/SurveyAnalytics';
 import TaskVariableTable from './components/TaskVariableTable';
-import { flattenAllVariables, downloadCSV } from './utils/dataProcessor';
+import ExportSettingsModal from './components/ExportSettingsModal';
 
 const App = () => {
   const [data, setData] = useState(null);
   const [rawFiles, setRawFiles] = useState([]);
+  const [csvFiles, setCsvFiles] = useState([]);
+  const [exportOpen, setExportOpen] = useState(false);
   const [activeTask, setActiveTask] = useState('Task1');
   const [activeCondition, setActiveCondition] = useState('Visible');
   const [activeParticipant, setActiveParticipant] = useState(null);
 
-  const handleDataLoaded = (processedData, raw) => {
+  const handleDataLoaded = (processedData, raw, csvs) => {
     setData(processedData);
     setRawFiles(raw);
+    setCsvFiles(csvs || []);
     const participants = Object.keys(processedData.participants);
     if (participants.length > 0) {
       setActiveParticipant(participants[0]);
@@ -51,10 +54,10 @@ const App = () => {
           {data && (
             <button
               className="btn-primary"
-              onClick={() => downloadCSV(flattenAllVariables(rawFiles))}
+              onClick={() => setExportOpen(true)}
               style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
             >
-              <Download size={18} /> Export All Variables (.csv)
+              <Download size={18} /> Export for analysis…
             </button>
           )}
           <div className="stat-label">ALPHA v1.0.0</div>
@@ -64,6 +67,14 @@ const App = () => {
       <main style={{ maxWidth: '1400px', margin: '0 auto', padding: '40px' }}>
 
         {!data && <DataIngest onDataLoaded={handleDataLoaded} />}
+
+        {exportOpen && (
+          <ExportSettingsModal
+            rawFiles={rawFiles}
+            csvFiles={csvFiles}
+            onClose={() => setExportOpen(false)}
+          />
+        )}
 
         {data && (
           <>

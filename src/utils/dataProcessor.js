@@ -1,5 +1,73 @@
 import stats from 'stats-lite';
 
+// Maps a raw device label (from filename or experiment_status) to the
+// research condition label used in the questionnaires and the analysis.
+export const normalizeConditionLabel = (raw) => {
+    if (!raw) return 'Unknown';
+    const cleaned = String(raw).trim().replace(/_/g, ' ');
+    const lower = cleaned.toLowerCase();
+    if (lower.includes('quest')) return 'AR-VST';
+    if (lower.includes('hololens')) return 'AR-OST';
+    if (lower.includes('screen')) return 'On-Screen';
+    return cleaned;
+};
+
+// Strips PCUE-Q wrapper / parenthetical hardware names from questionnaire
+// "condition" values like "PCUE-Q for AR-OST (Hololens)" → "AR-OST".
+export const normalizeQuestionnaireCondition = (raw) => {
+    if (!raw) return 'Unknown';
+    let s = String(raw).trim();
+    s = s.replace(/^PCUE-Q\s+for\s+/i, '');
+    s = s.replace(/\s*\([^)]*\)\s*$/, '');
+    return normalizeConditionLabel(s);
+};
+
+// Pulls metadata out of the canonical filename:
+//   ID1__HoloLens_2__Task1_Placing__Visible_collect_20260320_101417.json
+const FILENAME_RE = /^ID(\d+)__([^_].*?)__Task(\d)_([A-Za-z]+)__([A-Za-z]+)_collect_(\d{8})_(\d{6})\.json$/i;
+
+export const parseFilenameMetadata = (filename) => {
+    if (!filename) return null;
+    const m = filename.match(FILENAME_RE);
+    if (!m) return null;
+    const [, pid, deviceRaw, taskNum, , obstruction, datePart, timePart] = m;
+    const ts = `${datePart.slice(0, 4)}-${datePart.slice(4, 6)}-${datePart.slice(6, 8)}T${timePart.slice(0, 2)}:${timePart.slice(2, 4)}:${timePart.slice(4, 6)}`;
+    return {
+        filename,
+        pid,
+        deviceRaw,
+        conditionLabel: normalizeConditionLabel(deviceRaw),
+        taskNum: parseInt(taskNum, 10),
+        obstruction,
+        timestamp: ts,
+        timestampMs: Date.parse(ts),
+    };
+};
+
+// For each participant, ranks the three conditions by earliest filename
+// timestamp → 1, 2, 3. Returns { pid: { conditionLabel: order } }.
+export const deriveConditionOrder = (rawFiles) => {
+    const earliest = {};
+    for (const rf of rawFiles) {
+        const meta = parseFilenameMetadata(rf.filename);
+        if (!meta) continue;
+        if (!earliest[meta.pid]) earliest[meta.pid] = {};
+        const cur = earliest[meta.pid][meta.conditionLabel];
+        if (cur === undefined || meta.timestampMs < cur) {
+            earliest[meta.pid][meta.conditionLabel] = meta.timestampMs;
+        }
+    }
+    const out = {};
+    for (const pid of Object.keys(earliest)) {
+        const ranked = Object.entries(earliest[pid])
+            .sort((a, b) => a[1] - b[1])
+            .map(([label]) => label);
+        out[pid] = {};
+        ranked.forEach((label, idx) => { out[pid][label] = idx + 1; });
+    }
+    return out;
+};
+
 /**
  * Parses the experiment_status string into metadata components.
  * Format: "ID[Number] [Method] [Task].[Subtask] [Condition]"

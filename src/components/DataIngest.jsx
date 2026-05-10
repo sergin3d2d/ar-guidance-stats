@@ -21,7 +21,7 @@ const DataIngest = ({ onDataLoaded }) => {
                     const reader = new FileReader();
                     reader.onload = (event) => {
                         try {
-                            resolve(JSON.parse(event.target.result));
+                            resolve({ filename: file.name, json: JSON.parse(event.target.result) });
                         } catch (err) {
                             console.error('Error parsing JSON:', file.name);
                             resolve(null);
@@ -41,11 +41,13 @@ const DataIngest = ({ onDataLoaded }) => {
                 });
             });
 
-            const allData = (await Promise.all(dataPromises)).filter(d => d !== null);
+            const rawFiles = (await Promise.all(dataPromises)).filter(d => d !== null);
             const csvData = await Promise.all(csvPromises);
 
+            // Pass JSON contents (without filename wrapper) to legacy processor.
+            const allData = rawFiles.map(f => f.json);
             const processed = processExperimentData(allData, csvData);
-            onDataLoaded(processed, allData);
+            onDataLoaded(processed, rawFiles, csvData);
         } catch (err) {
             console.error('Data loading error:', err);
         } finally {

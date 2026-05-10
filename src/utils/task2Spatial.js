@@ -1,0 +1,277 @@
+// Shared spatial math for Task 2 (tracing).
+// Used by both the dashboard chart and the data export so they agree.
+
+const qConjugate = (q) => ({ x: -q.x, y: -q.y, z: -q.z, w: q.w });
+
+const qMultiply = (a, b) => ({
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+});
+
+// Hamilton convention: rotates a world vector into the local frame whose
+// orientation in world is given by q (i.e. q is the local-to-world rotation).
+const rotateWorldToLocal = (p, q) => {
+    const pq = { x: p.x, y: p.y, z: p.z, w: 0 };
+    const qInv = qConjugate(q);
+    const r = qMultiply(qMultiply(qInv, pq), q);
+    return { x: r.x, y: r.y, z: r.z };
+};
+
+export const getSurfaceTransform = (values) => ({
+    pos: {
+        x: values?.surface_position_x || 0,
+        y: values?.surface_position_y || 0,
+        z: values?.surface_position_z || 0,
+    },
+    quat: {
+        x: values?.surface_rotation_quat_x || 0,
+        y: values?.surface_rotation_quat_y || 0,
+        z: values?.surface_rotation_quat_z || 0,
+        w: values?.surface_rotation_quat_w !== undefined ? values.surface_rotation_quat_w : 1,
+    },
+});
+
+// Transform a single world point into surface-local frame.
+export const transformPointToLocal = (point, transform) => {
+    const rel = {
+        x: (point.position_x || 0) - transform.pos.x,
+        y: (point.position_y || 0) - transform.pos.y,
+        z: (point.position_z || 0) - transform.pos.z,
+    };
+    return rotateWorldToLocal(rel, transform.quat);
+};
+
+// Transform an entire draw-points array. Carries through index, timestamp,
+// is_line_break, and the per-point surface normal (also rotated into local).
+export const transformDrawPoints = (points, transform) => {
+    if (!points || points.length === 0) return [];
+    return points.map((p) => {
+        const local = transformPointToLocal(p, transform);
+        const normalLocal = (p.normal_x !== undefined || p.normal_y !== undefined || p.normal_z !== undefined)
+            ? rotateWorldToLocal({ x: p.normal_x || 0, y: p.normal_y || 0, z: p.normal_z || 0 }, transform.quat)
+            : null;
+        return {
+            index: p.index,
+            t: p.timestamp,
+            is_line_break: !!p.is_line_break,
+            x: local.x,
+            y: local.y,
+            z: local.z,
+            nx: normalLocal?.x ?? null,
+            ny: normalLocal?.y ?? null,
+            nz: normalLocal?.z ?? null,
+        };
+    });
+};
+
+// --- Reference-path parsing & cleanup ---------------------------------------
+
+const downsampleVoxel = (points, voxelSize = 0.001) => {
+    const voxels = new Map();
+    for (const p of points) {
+        const key = `${Math.floor(p.x / voxelSize)},${Math.floor(p.y / voxelSize)},${Math.floor(p.z / voxelSize)}`;
+        if (!voxels.has(key)) voxels.set(key, { sx: 0, sy: 0, sz: 0, n: 0 });
+        const v = voxels.get(key);
+        v.sx += p.x; v.sy += p.y; v.sz += p.z; v.n += 1;
+    }
+    const out = [];
+    for (const v of voxels.values()) out.push({ x: v.sx / v.n, y: v.sy / v.n, z: v.sz / v.n });
+    return out;
+};
+
+const sortNearestNeighbor = (points, threshold = 0.015) => {
+    if (points.length <= 1) return points.slice();
+    const findPath = (start) => {
+        const sorted = [start];
+        const remaining = points.filter((p) => p !== start);
+        const thrSq = threshold * threshold;
+        while (remaining.length > 0) {
+            let last = sorted[sorted.length - 1];
+            if (last && last.x === null && sorted.length >= 2) last = sorted[sorted.length - 2];
+            let nearestIdx = 0;
+            let minSq = Infinity;
+            for (let i = 0; i < remaining.length; i++) {
+                const dx = remaining[i].x - last.x;
+                const dy = remaining[i].y - last.y;
+                const dz = remaining[i].z - last.z;
+                const d = dx * dx + dy * dy + dz * dz;
+                if (d < minSq) { minSq = d; nearestIdx = i; }
+            }
+            if (minSq > thrSq) sorted.push({ x: null, y: null, z: null });
+            sorted.push(remaining[nearestIdx]);
+            remaining.splice(nearestIdx, 1);
+        }
+        return sorted;
+    };
+    const firstPass = findPath(points[0]);
+    let validEnd = firstPass.length - 1;
+    while (validEnd >= 0 && firstPass[validEnd].x === null) validEnd--;
+    return findPath(firstPass[validEnd] || points[0]);
+};
+
+const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3) => {
+    let cur = points.slice();
+    const corners = new Array(points.length).fill(false);
+    for (let i = 0; i < points.length; i++) {
+        if (points[i].x === null) continue;
+        const prev = Math.max(0, i - 4);
+        const next = Math.min(points.length - 1, i + 4);
+        if (points[prev].x === null || points[next].x === null || i === 0 || i === points.length - 1) {
+            corners[i] = true;
+            continue;
+        }
+        const p = points[i];
+        const v1 = { x: p.x - points[prev].x, y: p.y - points[prev].y, z: p.z - points[prev].z };
+        const v2 = { x: points[next].x - p.x, y: points[next].y - p.y, z: points[next].z - p.z };
+        const l1 = Math.hypot(v1.x, v1.y, v1.z);
+        const l2 = Math.hypot(v2.x, v2.y, v2.z);
+        if (l1 > 0.001 && l2 > 0.001) {
+            const dot = (v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / (l1 * l2);
+            if (dot < 0.70) corners[i] = true;
+        }
+    }
+    for (let it = 0; it < iterations; it++) {
+        const nxt = [];
+        for (let i = 0; i < cur.length; i++) {
+            const p = cur[i];
+            if (p.x === null || corners[i]) { nxt.push(p); continue; }
+            let sx = 0, sy = 0, sz = 0, n = 0;
+            for (let j = Math.max(0, i - windowSize); j <= Math.min(cur.length - 1, i + windowSize); j++) {
+                if (cur[j].x !== null) { sx += cur[j].x; sy += cur[j].y; sz += cur[j].z; n++; }
+            }
+            nxt.push(n > 0 ? { x: sx / n, y: sy / n, z: sz / n } : p);
+        }
+        cur = nxt;
+    }
+    return cur;
+};
+
+const clusterMilestones = (points, threshold = 0.003) => {
+    const clusters = [];
+    for (const p of points) {
+        let added = false;
+        for (const c of clusters) {
+            const d = Math.hypot(p.x - c.x, p.y - c.y, p.z - c.z);
+            if (d < threshold) {
+                c.pts.push(p);
+                c.x = c.pts.reduce((s, pt) => s + pt.x, 0) / c.pts.length;
+                c.y = c.pts.reduce((s, pt) => s + pt.y, 0) / c.pts.length;
+                c.z = c.pts.reduce((s, pt) => s + pt.z, 0) / c.pts.length;
+                added = true;
+                break;
+            }
+        }
+        if (!added) clusters.push({ x: p.x, y: p.y, z: p.z, pts: [p] });
+    }
+    return clusters.map((c) => ({ x: c.x, y: c.y, z: c.z }));
+};
+
+export const parseReferenceTxt = (txt) => {
+    if (!txt) return { path: [], milestones: [] };
+    const pathRaw = [];
+    const milestonesRaw = [];
+    for (const line of txt.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('index')) continue;
+        const parts = trimmed.split(',');
+        if (parts.length < 4) continue;
+        const pt = { x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) };
+        pathRaw.push(pt);
+        if (parts.length >= 6 && (parts[5].includes('Second') || parts[5].includes('Red') || parts[4] === '1')) {
+            milestonesRaw.push(pt);
+        }
+    }
+    const downsampled = downsampleVoxel(pathRaw, 0.001);
+    const sorted = sortNearestNeighbor(downsampled);
+    const smoothed = smoothPathPreserveCorners(sorted, 10, 3);
+    const milestones = clusterMilestones(milestonesRaw, 0.003);
+    return { path: smoothed, milestones };
+};
+
+// Cumulative arclength along a (possibly broken) path. Same length as input.
+export const cumulativeArclength = (points) => {
+    const out = [0];
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+        const a = points[i - 1];
+        const b = points[i];
+        if (a.x !== null && b.x !== null) {
+            total += Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+        }
+        out.push(total);
+    }
+    return out;
+};
+
+// For each transformed user point, find the nearest ref-path point.
+// Returns one entry per user point: { closest_ref_index, dist_3d_mm, dist_signed_mm }.
+// Signed distance uses the user-point surface normal when available (preferred);
+// falls back to the local-Y component otherwise. Skips line-break points.
+export const computeDeviations = (transformedPoints, refPoints) => {
+    const out = new Array(transformedPoints.length);
+    for (let i = 0; i < transformedPoints.length; i++) {
+        const p = transformedPoints[i];
+        if (p.is_line_break) {
+            out[i] = { closest_ref_index: null, dist_3d_mm: null, dist_signed_mm: null };
+            continue;
+        }
+        let minSq = Infinity;
+        let closest = 0;
+        for (let j = 0; j < refPoints.length; j++) {
+            const r = refPoints[j];
+            if (r.x === null) continue;
+            const dx = p.x - r.x;
+            const dy = p.y - r.y;
+            const dz = p.z - r.z;
+            const d = dx * dx + dy * dy + dz * dz;
+            if (d < minSq) { minSq = d; closest = j; }
+        }
+        const r = refPoints[closest];
+        const dx = p.x - r.x;
+        const dy = p.y - r.y;
+        const dz = p.z - r.z;
+        const dist3d = Math.sqrt(minSq);
+        let signed;
+        if (p.nx !== null && p.ny !== null && p.nz !== null) {
+            const nLen = Math.hypot(p.nx, p.ny, p.nz) || 1;
+            signed = (dx * p.nx + dy * p.ny + dz * p.nz) / nLen;
+        } else {
+            signed = dy;
+        }
+        out[i] = {
+            closest_ref_index: closest,
+            dist_3d_mm: dist3d * 1000,
+            dist_signed_mm: signed * 1000,
+        };
+    }
+    return out;
+};
+
+// Sanity check: warn if user-trace centroid is far from reference-path centroid
+// in surface-local space. Returns the offset magnitude in millimeters.
+export const measureAlignmentOffset = (transformedPoints, refPoints) => {
+    const valid = transformedPoints.filter((p) => !p.is_line_break);
+    const refValid = refPoints.filter((r) => r.x !== null);
+    if (valid.length === 0 || refValid.length === 0) return null;
+    const centroid = (pts) => pts.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y, z: acc.z + p.z }), { x: 0, y: 0, z: 0 });
+    const cu = centroid(valid);
+    const cr = centroid(refValid);
+    cu.x /= valid.length; cu.y /= valid.length; cu.z /= valid.length;
+    cr.x /= refValid.length; cr.y /= refValid.length; cr.z /= refValid.length;
+    return Math.hypot(cu.x - cr.x, cu.y - cr.y, cu.z - cr.z) * 1000;
+};
+
+// Normalize draw-point timestamps to "seconds since start". The recorder
+// sometimes emits ns; auto-detect using inter-sample dt magnitude.
+export const normalizeTimestampsToSeconds = (transformedPoints) => {
+    if (transformedPoints.length < 2) {
+        return transformedPoints.map((p) => ({ ...p, t_seconds: 0 }));
+    }
+    const sample = Math.abs((transformedPoints[5]?.t ?? transformedPoints[1].t) - transformedPoints[0].t);
+    const isNs = sample > 1000;
+    const scale = isNs ? 1e-9 : 1.0;
+    const t0 = transformedPoints[0].t;
+    return transformedPoints.map((p) => ({ ...p, t_seconds: (p.t - t0) * scale }));
+};

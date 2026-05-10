@@ -12,6 +12,7 @@
   "dependencies": {
     "@sgratzl/chartjs-chart-boxplot": "^4.4.5",
     "chart.js": "^4.5.1",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.577.0",
     "plotly.js": "^3.4.0",
     "react": "^19.2.0",
