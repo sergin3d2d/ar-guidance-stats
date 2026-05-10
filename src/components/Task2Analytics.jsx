@@ -3,6 +3,7 @@ import Plot from 'react-plotly.js';
 import { getColor } from '../utils/colors';
 import {
     parseReferenceTxt,
+    parseReferenceTxtForAnalysis,
     getSurfaceTransform,
     transformDrawPoints,
     transformPointToLocal,
@@ -16,15 +17,21 @@ import {
 import visibleTxtRaw from '../../Visible.txt?raw';
 import obstructTxtRaw from '../../Obstruct.txt?raw';
 
+// Visual reference (smoothed nearest-neighbor) — used by 3D Spatial Trace.
 const visibleRefData = parseReferenceTxt(visibleTxtRaw);
 const obstructRefData = parseReferenceTxt(obstructTxtRaw);
 const visibleRefPoints = visibleRefData.path;
 const visibleRefMilestones = visibleRefData.milestones;
 const obstructRefPoints = obstructRefData.path;
 const obstructRefMilestones = obstructRefData.milestones;
-
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
+
+// Analytical reference (.txt native row order) — used only by the Path
+// Deviation Profile chart for X-axis arclength and milestone projection.
+// Distinct spheres get distinct arclengths because the row order = path order.
+const visibleAnalytical = parseReferenceTxtForAnalysis(visibleTxtRaw);
+const obstructAnalytical = parseReferenceTxtForAnalysis(obstructTxtRaw);
 
 // Note: milestones are now sourced per-trial from JSON reference_point_measurements
 // (not the .txt clustered red dots) so the dashboard uses the same M01..M15
@@ -408,8 +415,11 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         }, {})
                     ).map(([conditionName, seriesGroup], cIdx) => {
                         const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
-                        const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
-                        const refDistRaw = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
+                        // Analytical reference (.txt native order) — used for the chart's
+                        // X axis arclength so distinct milestones get distinct positions.
+                        const analytical = conditionName === 'Visible' ? visibleAnalytical : obstructAnalytical;
+                        const refPointsRaw = analytical.points;
+                        const refDistRaw = analytical.arclength;
                         // Use JSON-derived milestones (same M01..M15 numbering as Maya).
                         const milestonesForCond = conditionName === 'Visible' ? visibleJsonMilestones : obstructJsonMilestones;
 

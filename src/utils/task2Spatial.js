@@ -200,6 +200,89 @@ const clusterMilestones = (points, threshold = 0.003) => {
     return clusters.map((c) => ({ x: c.x, y: c.y, z: c.z }));
 };
 
+// Analytical reference: ordered points + arclength using the .txt file's
+// native row order, which IS the path-walking order for these data files
+// (verified: median row-to-row distance 0.5mm). No nearest-neighbor sort,
+// so the arclengths reflect true path traversal — distinct spheres get
+// distinct arclength positions.
+//
+// Used by the Path Deviation Profile chart for X-axis arclength and
+// milestone X positions. The visual / Maya polyline still comes from
+// parseReferenceTxt (nearest-neighbor + smoothed for visual continuity).
+export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
+    const {
+        voxelMeters = 0.002,        // light voxel collapse to remove duplicate samples
+        smoothIterations = 6,       // simple moving-average smoothing (no corner detection)
+        smoothWindow = 3,           // moving-average half-window
+        strokeBreakMeters = 0.05,   // distance above which a row jump is treated as a stroke break
+                                    // (excluded from arclength, not from the points list)
+    } = options;
+    if (!txt) return { points: [], arclength: [] };
+
+    const raw = [];
+    for (const line of txt.split('\n')) {
+        const t = line.trim();
+        if (!t || t.startsWith('#') || t.startsWith('index')) continue;
+        const parts = t.split(',');
+        if (parts.length < 4) continue;
+        raw.push({ x: parseFloat(parts[1]), y: parseFloat(parts[2]), z: parseFloat(parts[3]) });
+    }
+
+    // Order-preserving voxel downsample (collapses contiguous near-duplicates,
+    // preserves the file's native walking order).
+    const downsampled = (() => {
+        const out = [];
+        let currentKey = null;
+        let acc = null;
+        const flush = () => {
+            if (acc && acc.n > 0) out.push({ x: acc.sx / acc.n, y: acc.sy / acc.n, z: acc.sz / acc.n });
+        };
+        for (const p of raw) {
+            const key = `${Math.floor(p.x / voxelMeters)},${Math.floor(p.y / voxelMeters)},${Math.floor(p.z / voxelMeters)}`;
+            if (key !== currentKey) {
+                flush();
+                currentKey = key;
+                acc = { sx: 0, sy: 0, sz: 0, n: 0 };
+            }
+            acc.sx += p.x; acc.sy += p.y; acc.sz += p.z; acc.n += 1;
+        }
+        flush();
+        return out;
+    })();
+
+    // Simple moving-average smoothing — corner-preservation isn't needed here
+    // because we only use these points for arclength + closest-user search,
+    // not for rendering. Light smoothing removes sample-level jitter that
+    // would inflate the arclength.
+    let pts = downsampled;
+    for (let iter = 0; iter < smoothIterations; iter++) {
+        const next = [];
+        for (let i = 0; i < pts.length; i++) {
+            let sx = 0, sy = 0, sz = 0, n = 0;
+            for (let j = Math.max(0, i - smoothWindow); j <= Math.min(pts.length - 1, i + smoothWindow); j++) {
+                sx += pts[j].x; sy += pts[j].y; sz += pts[j].z; n++;
+            }
+            next.push({ x: sx / n, y: sy / n, z: sz / n });
+        }
+        pts = next;
+    }
+
+    // Cumulative arclength, excluding jumps that look like stroke breaks
+    // (so the path length reflects the painted line, not the pen-up moves).
+    const arclength = [0];
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i - 1].x;
+        const dy = pts[i].y - pts[i - 1].y;
+        const dz = pts[i].z - pts[i - 1].z;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < strokeBreakMeters) total += d;
+        arclength.push(total);
+    }
+
+    return { points: pts, arclength };
+};
+
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
         smooth = true,             // apply corner-preserving smoothing pass
