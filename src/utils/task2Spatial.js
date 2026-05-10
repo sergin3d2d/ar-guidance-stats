@@ -203,8 +203,11 @@ const clusterMilestones = (points, threshold = 0.003) => {
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
         smooth = true,           // apply corner-preserving smoothing pass
+        smoothIterations = 20,   // smoothing passes (higher = smoother straight runs)
+        smoothWindow = 5,        // moving-average half-window in points
         smoothCornerCos = 0.95,  // dot threshold below which a point is treated as a corner (preserved)
         removeOutliers = true,   // strip spike/fly-away points after sorting
+        voxelMeters = 0.001,     // pre-sort voxel-downsample edge length
     } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
@@ -220,10 +223,10 @@ export const parseReferenceTxt = (txt, options = {}) => {
             milestonesRaw.push(pt);
         }
     }
-    const downsampled = downsampleVoxel(pathRaw, 0.001);
+    const downsampled = downsampleVoxel(pathRaw, voxelMeters);
     const sorted = sortNearestNeighbor(downsampled);
     const cleaned = removeOutliers ? removeOutlierSpikes(sorted) : sorted;
-    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, 10, 3, smoothCornerCos) : cleaned;
+    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, smoothIterations, smoothWindow, smoothCornerCos) : cleaned;
     const milestones = clusterMilestones(milestonesRaw, 0.003);
     return { path: finalPath, milestones };
 };
