@@ -177,32 +177,6 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
     const validDevs = deviations.filter((d) => d && d.dev_lateral_mm !== null);
     console.log(`  Lateral deviation: n=${validDevs.length}  rms=${Math.sqrt(validDevs.reduce((s, d) => s + d.dev_lateral_mm ** 2, 0) / validDevs.length).toFixed(2)} mm  max|=${Math.max(...validDevs.map((d) => Math.abs(d.dev_lateral_mm))).toFixed(2)} mm`);
 
-    // --- File 1: planned reference path -------------------------------------
-
-    let refScene = mayaHeader(outRefName);
-
-    refScene += '\n// --- Smoothed reference path (the original visual reference) ---\n';
-    refScene += mayaTransformGroup('reference_path_smoothed');
-    refScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
-
-    refScene += '\n// --- Smoothed reference path points (locators, walk order) ---\n';
-    refScene += mayaTransformGroup('reference_path_points');
-    refSmooth.path.forEach((p, i) => {
-        if (p.x === null) return;
-        refScene += mayaLocator(`pt_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_points');
-    });
-
-    refScene += '\n// --- Planned milestones (from JSON reference_position) ---\n';
-    refScene += mayaTransformGroup('milestones_planned');
-    for (const m of runtimeMilestones) {
-        refScene += mayaLocator(m.label, m.planned.x, m.planned.y, m.planned.z, 'milestones_planned');
-    }
-
-    fs.writeFileSync(path.join(OUT_DIR, outRefName), refScene, 'utf8');
-    console.log(`\n  ✓ Wrote ${path.join(OUT_DIR, outRefName)}  (${(refScene.length / 1024).toFixed(1)} KB)`);
-
-    // --- File 2: registered traced path -------------------------------------
-
     // Insert nulls at line breaks so the curve breaks into separate segments.
     const tracedSegmented = [];
     for (const p of transformed) {
@@ -212,70 +186,117 @@ const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
         tracedSegmented.push(p);
     }
 
+    // --- Reusable Maya scene fragment builders ----------------------------
+
+    const fragRefPath = () => {
+        let s = '\n// --- Smoothed reference path (the original visual reference) ---\n';
+        s += mayaTransformGroup('reference_path_smoothed');
+        s += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
+
+        s += '\n// --- Smoothed reference path points (locators, walk order) ---\n';
+        s += mayaTransformGroup('reference_path_points');
+        refSmooth.path.forEach((p, i) => {
+            if (p.x === null) return;
+            s += mayaLocator(`pt_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'reference_path_points');
+        });
+        return s;
+    };
+
+    const fragTracedPath = () => {
+        let s = '\n// --- Traced path (NURBS curves, one per continuous stroke) ---\n';
+        s += mayaTransformGroup('traced_path');
+        s += mayaNurbsCurveSegments('traced_path', tracedSegmented);
+
+        s += '\n// --- Traced path points (locators) ---\n';
+        s += mayaTransformGroup('traced_path_points');
+        transformed.forEach((p, i) => {
+            s += mayaLocator(`tp_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'traced_path_points');
+        });
+        return s;
+    };
+
+    const fragMilestonesPlanned = () => {
+        let s = '\n// --- Planned milestones (from JSON reference_position) ---\n';
+        s += mayaTransformGroup('milestones_planned');
+        for (const m of runtimeMilestones) {
+            s += mayaLocator(m.label, m.planned.x, m.planned.y, m.planned.z, 'milestones_planned');
+        }
+        return s;
+    };
+
+    const fragMilestonesUserHit = () => {
+        let s = `\n// --- User-hit milestones (closest_draw_point_position from JSON) ---\n`;
+        s += `// Distance to milestones_planned[label] = recorded per-milestone deviation.\n`;
+        s += mayaTransformGroup('milestones_user_hit');
+        for (const m of runtimeMilestones) {
+            s += mayaLocator(m.label, m.userHit.x, m.userHit.y, m.userHit.z, 'milestones_user_hit');
+        }
+        return s;
+    };
+
+    const fragUserToRefMeasurements = () => {
+        let s = '\n// --- User-side measurements (each user point → closest ref segment) ---\n';
+        s += '// One degree-1 NURBS curve per user point; length = total deviation.\n';
+        s += mayaTransformGroup('measurements_user_to_ref');
+        let n = 0;
+        for (let i = 0; i < transformed.length; i++) {
+            const p = transformed[i];
+            const d = deviations[i];
+            if (!d || d.foot_x === null || p.is_line_break) continue;
+            s += mayaNurbsCurveSegments(`meas_user_${String(i).padStart(4, '0')}`, [
+                { x: p.x, y: p.y, z: p.z },
+                { x: d.foot_x, y: d.foot_y, z: d.foot_z },
+            ]);
+            n++;
+        }
+        return { fragment: s, count: n };
+    };
+
+    const fragRefToUserMeasurements = () => {
+        let s = '\n// --- Reference-side measurements (each ref point → closest user point) ---\n';
+        s += '// One degree-1 NURBS curve per reference path point. Same algorithm\n';
+        s += '// as the Path Deviation Profile chart (computeRefPathDeviations).\n';
+        s += mayaTransformGroup('measurements_ref_to_user');
+        let n = 0;
+        for (let i = 0; i < refSmooth.path.length; i++) {
+            const r = refSmooth.path[i];
+            const d = refDeviations[i];
+            if (!r || r.x === null) continue;
+            if (!d || d.user_x === null) continue;
+            s += mayaNurbsCurveSegments(`meas_ref_${String(i).padStart(4, '0')}`, [
+                { x: r.x, y: r.y, z: r.z },
+                { x: d.user_x, y: d.user_y, z: d.user_z },
+            ]);
+            n++;
+        }
+        return { fragment: s, count: n };
+    };
+
+    const userMeas = fragUserToRefMeasurements();
+    const refMeas = fragRefToUserMeasurements();
+    console.log(`  ${userMeas.count} user-to-ref measurement lines, ${refMeas.count} ref-to-user`);
+
+    // --- File 1: reference-centric (now includes traced + ref-side measurements) ---
+
+    let refScene = mayaHeader(outRefName);
+    refScene += fragRefPath();
+    refScene += fragMilestonesPlanned();
+    refScene += fragTracedPath();
+    refScene += fragMilestonesUserHit();
+    refScene += refMeas.fragment;
+
+    fs.writeFileSync(path.join(OUT_DIR, outRefName), refScene, 'utf8');
+    console.log(`\n  ✓ Wrote ${path.join(OUT_DIR, outRefName)}  (${(refScene.length / 1024).toFixed(1)} KB)`);
+
+    // --- File 2: traced-centric (same content for parity) -----------------
+
     let tracedScene = mayaHeader(outTracedName);
-    tracedScene += '\n// --- Smoothed reference path (Maya measurement target) ---\n';
-    tracedScene += mayaTransformGroup('reference_path_smoothed');
-    tracedScene += mayaNurbsCurveSegments('reference_path_smoothed', refSmooth.path);
-
-    tracedScene += '\n// --- Traced path (NURBS curves, one per continuous stroke) ---\n';
-    tracedScene += mayaTransformGroup('traced_path');
-    tracedScene += mayaNurbsCurveSegments('traced_path', tracedSegmented);
-
-    tracedScene += '\n// --- Traced path points (locators) ---\n';
-    tracedScene += mayaTransformGroup('traced_path_points');
-    transformed.forEach((p, i) => {
-        tracedScene += mayaLocator(`tp_${String(i).padStart(4, '0')}`, p.x, p.y, p.z, 'traced_path_points');
-    });
-
-    // Measurement lines: one straight line per user point connecting the
-    // user point to its matched foot on the smoothed reference path.
-    // These are exactly what the dashboard chart computes.
-    tracedScene += '\n// --- User-side measurements (each user point → closest ref segment) ---\n';
-    tracedScene += '// One degree-1 NURBS curve per user point; length = total deviation.\n';
-    tracedScene += '// One line per recorded draw point — same as before.\n';
-    tracedScene += mayaTransformGroup('measurements_user_to_ref');
-    let nMeas = 0;
-    for (let i = 0; i < transformed.length; i++) {
-        const p = transformed[i];
-        const d = deviations[i];
-        if (!d || d.foot_x === null || p.is_line_break) continue;
-        const segs = [
-            { x: p.x, y: p.y, z: p.z },
-            { x: d.foot_x, y: d.foot_y, z: d.foot_z },
-        ];
-        tracedScene += mayaNurbsCurveSegments(`meas_user_${String(i).padStart(4, '0')}`, segs);
-        nMeas += 1;
-    }
-    console.log(`  ${nMeas} user-to-ref measurement lines drawn`);
-
-    tracedScene += '\n// --- Reference-side measurements (each ref point → closest user point) ---\n';
-    tracedScene += '// One degree-1 NURBS curve per reference path point. This is exactly\n';
-    tracedScene += '// the algorithm used by the Path Deviation Profile chart\n';
-    tracedScene += '// (computeRefPathDeviations: walk the ref, find closest user point at each).\n';
-    tracedScene += mayaTransformGroup('measurements_ref_to_user');
-    let nRefMeas = 0;
-    for (let i = 0; i < refSmooth.path.length; i++) {
-        const r = refSmooth.path[i];
-        const d = refDeviations[i];
-        if (!r || r.x === null) continue;
-        if (!d || d.user_x === null) continue;
-        const segs = [
-            { x: r.x, y: r.y, z: r.z },
-            { x: d.user_x, y: d.user_y, z: d.user_z },
-        ];
-        tracedScene += mayaNurbsCurveSegments(`meas_ref_${String(i).padStart(4, '0')}`, segs);
-        nRefMeas += 1;
-    }
-    console.log(`  ${nRefMeas} ref-to-user measurement lines drawn (chart algorithm)`);
-
-    tracedScene += `\n// --- User-hit milestones (closest_draw_point_position from JSON) ---\n`;
-    tracedScene += `// Same labels as ${outRefName} — the distance between the matching\n`;
-    tracedScene += `// M-locators is the recorded per-milestone deviation (also stored in\n`;
-    tracedScene += `// JSON reference_point_measurements[i].distance_mm).\n`;
-    tracedScene += mayaTransformGroup('milestones_user_hit');
-    for (const m of runtimeMilestones) {
-        tracedScene += mayaLocator(m.label, m.userHit.x, m.userHit.y, m.userHit.z, 'milestones_user_hit');
-    }
+    tracedScene += fragRefPath();
+    tracedScene += fragMilestonesPlanned();
+    tracedScene += fragTracedPath();
+    tracedScene += fragMilestonesUserHit();
+    tracedScene += userMeas.fragment;
+    tracedScene += refMeas.fragment;
 
     fs.writeFileSync(path.join(OUT_DIR, outTracedName), tracedScene, 'utf8');
     console.log(`  ✓ Wrote ${path.join(OUT_DIR, outTracedName)}  (${(tracedScene.length / 1024).toFixed(1)} KB)`);
