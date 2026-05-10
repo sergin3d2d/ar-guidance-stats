@@ -8,6 +8,7 @@ import {
     transformPointToLocal,
     cumulativeArclength,
     computeDeviations,
+    computeRefPathDeviations,
     detectAndFlipDirection,
     measureAlignmentOffset,
 } from '../utils/task2Spatial';
@@ -492,26 +493,25 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         const traces = seriesGroup.flatMap((s) => {
                             const origIdx = filteredSeries.indexOf(s);
                             const transformed = transformedSeries[origIdx];
-                            // Direction was already detected above; pass the directional ref
-                            // and disable autoflip so each series uses the same orientation.
-                            const deviations = computeDeviations(transformed, refPath, refDist, { autoFlipDirection: false });
-
-                            // Sort by arclength so the line is monotonic along the path.
-                            // Where the user traced the same arclength multiple times (back-and-forth
-                            // strokes), the line just wiggles vertically at that x — much more readable
-                            // than connecting time-adjacent points across the whole chart.
-                            const pairs = [];
+                            // Walk the reference path; for each ref point, find the closest user
+                            // point and compute the deviation. X = ref point arclength
+                            // (monotonic by construction); Y = lateral deviation.
+                            const deviations = computeRefPathDeviations(refPath, refDist, transformed);
+                            const xs = [], ys = [];
                             for (const d of deviations) {
-                                if (!d || d.dev_lateral_mm === null) continue;
-                                pairs.push({ x: d.arclength_m, y: d.dev_lateral_mm });
+                                if (d.dev_lateral_mm === null) {
+                                    xs.push(null); ys.push(null);
+                                } else {
+                                    xs.push(d.arclength_m);
+                                    ys.push(d.dev_lateral_mm);
+                                }
                             }
-                            pairs.sort((a, b) => a.x - b.x);
                             const color = getColor(s.method, s.condition);
                             return [{
-                                x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.y),
+                                x: xs, y: ys,
                                 type: 'scatter', mode: 'lines', name: s.name,
                                 line: { color, width: 1.6 },
+                                connectgaps: false,
                                 legendgroup: s.name,
                                 hovertemplate: 'arc=%{x:.3f} m<br>lateral=%{y:.2f} mm<extra></extra>',
                             }];
@@ -539,7 +539,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Each user point projects onto the closest segment of the planned path; pairs (arclength, lateral deviation) are sorted by arclength so the line follows the path. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones along the path, renumbered M01…M{milestoneEntries.length} in arclength order so they read left-to-right (hover for original sphere ID). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
+                                    Walks along the smoothed reference path; for each ref point, finds the closest user-trace point and reports lateral deviation. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}X = arclength along reference (one Y per X). Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones at their projected arclengths, renumbered M01…M{milestoneEntries.length} left-to-right (hover for original sphere ID). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}

@@ -414,6 +414,104 @@ export const computeDeviations = (transformedPoints, refPoints, refArclength, op
     return out;
 };
 
+// Walk along the reference path; for each ref point, find the closest user
+// (traced) point and compute the deviation vector. Returns one record per ref
+// point in arclength order. The chart plots these directly — naturally
+// monotonic along X, one Y per X, no sort or windowed-projection ambiguity.
+//
+// Decomposition at each ref point R_i:
+//   T = local tangent of the reference polyline (averaged inbound+outbound)
+//   N = user-point surface normal (orthogonalised vs T) if available
+//   B = T × N
+//   dev_lateral_mm = (U − R) · B   (in-surface, signed; the meaningful error)
+//   dev_total_mm   = |U − R|
+//
+// Returns null fields for break points in the reference path.
+export const computeRefPathDeviations = (refPath, refArclength, transformedUserPoints) => {
+    const out = new Array(refPath.length);
+    const validUser = transformedUserPoints.filter((p) => !p.is_line_break);
+
+    const buildEmpty = (i) => ({
+        arclength_m: refArclength?.[i] ?? 0,
+        dev_lateral_mm: null, dev_total_mm: null,
+        closest_user_idx: null, ref_x: null, ref_y: null, ref_z: null,
+        user_x: null, user_y: null, user_z: null,
+    });
+
+    if (validUser.length === 0) {
+        for (let i = 0; i < refPath.length; i++) out[i] = buildEmpty(i);
+        return out;
+    }
+
+    for (let i = 0; i < refPath.length; i++) {
+        const r = refPath[i];
+        if (r.x === null) { out[i] = buildEmpty(i); continue; }
+
+        // 3D nearest user point
+        let bestIdx = 0, bestSq = Infinity;
+        for (let j = 0; j < validUser.length; j++) {
+            const u = validUser[j];
+            const dx = r.x - u.x, dy = r.y - u.y, dz = r.z - u.z;
+            const d = dx * dx + dy * dy + dz * dz;
+            if (d < bestSq) { bestSq = d; bestIdx = j; }
+        }
+        const u = validUser[bestIdx];
+        const dxU = u.x - r.x, dyU = u.y - r.y, dzU = u.z - r.z;
+        const distTotal = Math.sqrt(bestSq);
+
+        // Local tangent (average of inbound + outbound segment directions)
+        let tx = 0, ty = 0, tz = 0;
+        const prev = i > 0 ? refPath[i - 1] : null;
+        const next = i < refPath.length - 1 ? refPath[i + 1] : null;
+        if (prev && prev.x !== null) {
+            const ix = r.x - prev.x, iy = r.y - prev.y, iz = r.z - prev.z;
+            const il = Math.hypot(ix, iy, iz);
+            if (il > 1e-9) { tx += ix / il; ty += iy / il; tz += iz / il; }
+        }
+        if (next && next.x !== null) {
+            const ix = next.x - r.x, iy = next.y - r.y, iz = next.z - r.z;
+            const il = Math.hypot(ix, iy, iz);
+            if (il > 1e-9) { tx += ix / il; ty += iy / il; tz += iz / il; }
+        }
+        const tl = Math.hypot(tx, ty, tz) || 1;
+        tx /= tl; ty /= tl; tz /= tl;
+
+        // Normal: prefer user point's captured surface normal
+        let nx, ny, nz;
+        if (u.nx !== null && u.ny !== null && u.nz !== null) {
+            const nL = Math.hypot(u.nx, u.ny, u.nz) || 1;
+            nx = u.nx / nL; ny = u.ny / nL; nz = u.nz / nL;
+            const dotTN = nx * tx + ny * ty + nz * tz;
+            nx -= dotTN * tx; ny -= dotTN * ty; nz -= dotTN * tz;
+            const renorm = Math.hypot(nx, ny, nz) || 1;
+            nx /= renorm; ny /= renorm; nz /= renorm;
+        } else {
+            let upx = 0, upy = 1, upz = 0;
+            if (Math.abs(tx * upx + ty * upy + tz * upz) > 0.95) { upx = 0; upy = 0; upz = 1; }
+            const dotTU = tx * upx + ty * upy + tz * upz;
+            nx = upx - dotTU * tx; ny = upy - dotTU * ty; nz = upz - dotTU * tz;
+            const renorm = Math.hypot(nx, ny, nz) || 1;
+            nx /= renorm; ny /= renorm; nz /= renorm;
+        }
+
+        // Binormal = T × N
+        const bx = ty * nz - tz * ny;
+        const by = tz * nx - tx * nz;
+        const bz = tx * ny - ty * nx;
+        const devLateral = dxU * bx + dyU * by + dzU * bz;
+
+        out[i] = {
+            arclength_m: refArclength?.[i] ?? 0,
+            dev_lateral_mm: devLateral * 1000,
+            dev_total_mm: distTotal * 1000,
+            closest_user_idx: bestIdx,
+            ref_x: r.x, ref_y: r.y, ref_z: r.z,
+            user_x: u.x, user_y: u.y, user_z: u.z,
+        };
+    }
+    return out;
+};
+
 // Sanity check: warn if user-trace centroid is far from reference-path centroid
 // in surface-local space. Returns the offset magnitude in millimeters.
 export const measureAlignmentOffset = (transformedPoints, refPoints) => {
