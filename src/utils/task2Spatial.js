@@ -200,24 +200,6 @@ const clusterMilestones = (points, threshold = 0.003) => {
     return clusters.map((c) => ({ x: c.x, y: c.y, z: c.z }));
 };
 
-// Insert null breaks where consecutive .txt rows are far apart (stroke breaks).
-// Preserves the file's native row order, which IS the path-walking order for
-// the experiment's .txt outputs (verified: median row-to-row distance 0.5mm).
-const insertBreaksOnJumps = (points, jumpThresholdMeters) => {
-    if (points.length < 2) return points.slice();
-    const out = [points[0]];
-    for (let i = 1; i < points.length; i++) {
-        const dx = points[i].x - points[i - 1].x;
-        const dy = points[i].y - points[i - 1].y;
-        const dz = points[i].z - points[i - 1].z;
-        if (Math.sqrt(dx * dx + dy * dy + dz * dz) > jumpThresholdMeters) {
-            out.push({ x: null, y: null, z: null });
-        }
-        out.push(points[i]);
-    }
-    return out;
-};
-
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
         smooth = true,             // apply corner-preserving smoothing pass
@@ -226,8 +208,7 @@ export const parseReferenceTxt = (txt, options = {}) => {
         smoothCornerCos = 0.85,    // dot threshold below which a point is treated as a corner (preserved). Lower = fewer corners detected = more smoothing.
         smoothCornerLookahead = 8, // how many points each side to look for the corner check. Wider = less noise-sensitive.
         removeOutliers = true,     // strip spike/fly-away points after sorting
-        voxelMeters = 0.001,       // voxel-downsample edge length (collapses near-duplicate samples)
-        breakJumpMeters = 0.015,   // consecutive-row distance above which a stroke break is inserted
+        voxelMeters = 0.001,       // voxel-downsample edge length
     } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
@@ -243,44 +224,12 @@ export const parseReferenceTxt = (txt, options = {}) => {
             milestonesRaw.push(pt);
         }
     }
-    // Use the .txt row order directly — for these files it IS the path-walking
-    // order (verified empirically). The previous nearest-neighbor sort
-    // destroyed that order at sections where the path doubles back near
-    // itself, causing distinct spheres to project to the same arclength.
-    // Voxel-downsample first to collapse near-duplicate samples (preserves
-    // order because rows for a single voxel are contiguous in path order).
-    const downsampled = downsampleVoxelOrdered(pathRaw, voxelMeters);
-    const withBreaks = insertBreaksOnJumps(downsampled, breakJumpMeters);
-    const cleaned = removeOutliers ? removeOutlierSpikes(withBreaks) : withBreaks;
+    const downsampled = downsampleVoxel(pathRaw, voxelMeters);
+    const sorted = sortNearestNeighbor(downsampled);
+    const cleaned = removeOutliers ? removeOutlierSpikes(sorted) : sorted;
     const finalPath = smooth ? smoothPathPreserveCorners(cleaned, smoothIterations, smoothWindow, smoothCornerCos, smoothCornerLookahead) : cleaned;
     const milestones = clusterMilestones(milestonesRaw, 0.003);
     return { path: finalPath, milestones };
-};
-
-// Order-preserving voxel downsample: walks through points in input order,
-// emitting one averaged point per voxel cell (in the order the cell was
-// first encountered). This keeps the path-walking order intact, unlike
-// the original Map-iteration version which lost order.
-const downsampleVoxelOrdered = (points, voxelSize = 0.001) => {
-    const out = [];
-    let currentKey = null;
-    let acc = null;
-    const flush = () => {
-        if (acc && acc.n > 0) {
-            out.push({ x: acc.sx / acc.n, y: acc.sy / acc.n, z: acc.sz / acc.n });
-        }
-    };
-    for (const p of points) {
-        const key = `${Math.floor(p.x / voxelSize)},${Math.floor(p.y / voxelSize)},${Math.floor(p.z / voxelSize)}`;
-        if (key !== currentKey) {
-            flush();
-            currentKey = key;
-            acc = { sx: 0, sy: 0, sz: 0, n: 0 };
-        }
-        acc.sx += p.x; acc.sy += p.y; acc.sz += p.z; acc.n += 1;
-    }
-    flush();
-    return out;
 };
 
 // Cumulative arclength along a (possibly broken) path. Same length as input.
