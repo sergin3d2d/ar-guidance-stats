@@ -23,6 +23,25 @@ const obstructRefMilestones = obstructRefData.milestones;
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
 
+// For each clustered milestone, find its arclength along the smoothed reference.
+const milestoneArclengths = (refPoints, refDistances, milestones) => {
+    const out = [];
+    for (const m of milestones) {
+        let bestIdx = 0, bestSq = Infinity;
+        for (let j = 0; j < refPoints.length; j++) {
+            const r = refPoints[j];
+            if (r.x === null) continue;
+            const d = (m.x - r.x) ** 2 + (m.y - r.y) ** 2 + (m.z - r.z) ** 2;
+            if (d < bestSq) { bestSq = d; bestIdx = j; }
+        }
+        out.push(refDistances[bestIdx] || 0);
+    }
+    return out.sort((a, b) => a - b);
+};
+
+const visibleMilestoneArcs = milestoneArclengths(visibleRefPoints, visibleRefDistances, visibleRefMilestones);
+const obstructMilestoneArcs = milestoneArclengths(obstructRefPoints, obstructRefDistances, obstructRefMilestones);
+
 const calculateYMid = (points) => {
     const ys = points.map((p) => p.y).filter((y) => y !== null && y !== undefined);
     if (ys.length === 0) return 0;
@@ -354,7 +373,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                     />
                 </div>
 
-                {/* Path Deviation Profile (3D Euclidean, signed by surface normal) */}
+                {/* Path Deviation Profile — perpendicular + lateral decomposition vs ref arclength */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '20px', marginBottom: '20px' }}>
                     {Object.entries(
                         filteredSeries.reduce((acc, s) => {
@@ -366,6 +385,8 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
                         const refPoints = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
                         const refDistances = conditionName === 'Visible' ? visibleRefDistances : obstructRefDistances;
+                        const milestoneArcs = conditionName === 'Visible' ? visibleMilestoneArcs : obstructMilestoneArcs;
+                        const totalArc = refDistances[refDistances.length - 1] || 0;
 
                         // Convex/concave background regions (heuristic: above/below ref Y midline)
                         const bgShapes = [];
@@ -381,7 +402,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                                 bgShapes.push({
                                     type: 'rect', xref: 'x', yref: 'paper',
                                     x0: startX, x1: refDistances[j], y0: 0, y1: 1,
-                                    fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.10)' : 'rgba(100,200,100,0.10)',
+                                    fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.08)' : 'rgba(100,200,100,0.08)',
                                     layer: 'below', line: { width: 0 },
                                 });
                                 currentState = state;
@@ -391,60 +412,98 @@ const Task2Analytics = ({ participantData, participantId }) => {
                         if (currentState !== null && refPoints.length > 0) {
                             bgShapes.push({
                                 type: 'rect', xref: 'x', yref: 'paper',
-                                x0: startX, x1: refDistances[refDistances.length - 1], y0: 0, y1: 1,
-                                fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.10)' : 'rgba(100,200,100,0.10)',
+                                x0: startX, x1: totalArc, y0: 0, y1: 1,
+                                fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.08)' : 'rgba(100,200,100,0.08)',
                                 layer: 'below', line: { width: 0 },
+                            });
+                        }
+
+                        // Vertical milestone lines
+                        for (let mi = 0; mi < milestoneArcs.length; mi++) {
+                            bgShapes.push({
+                                type: 'line', xref: 'x', yref: 'paper',
+                                x0: milestoneArcs[mi], x1: milestoneArcs[mi], y0: 0, y1: 1,
+                                line: { color: 'rgba(0,0,0,0.45)', width: 1, dash: 'dot' },
+                                layer: 'below',
                             });
                         }
 
                         const traces = seriesGroup.flatMap((s) => {
                             const origIdx = filteredSeries.indexOf(s);
                             const transformed = transformedSeries[origIdx];
-                            const deviations = computeDeviations(transformed, refPoints);
+                            const deviations = computeDeviations(transformed, refPoints, refDistances);
 
-                            // Sort by ref-arclength so the line plot is monotonic.
                             const pairs = [];
                             for (let i = 0; i < deviations.length; i++) {
                                 const d = deviations[i];
-                                if (!d || d.dist_3d_mm === null) continue;
-                                pairs.push({ x: refDistances[d.closest_ref_index] || 0, signed: d.dist_signed_mm, abs: d.dist_3d_mm });
+                                if (!d || d.dev_total_mm === null) continue;
+                                pairs.push({
+                                    x: d.arclength_m,
+                                    perp: d.dev_perp_mm,
+                                    lateral: d.dev_lateral_mm,
+                                    total: d.dev_total_mm,
+                                    pointIdx: i,
+                                });
                             }
                             pairs.sort((a, b) => a.x - b.x);
                             const color = getColor(s.method, s.condition);
                             return [{
                                 x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.signed),
-                                type: 'scatter', mode: 'lines', name: `${s.name} (signed)`,
-                                line: { color, width: 1.5 },
+                                y: pairs.map((p) => p.perp),
+                                type: 'scatter', mode: 'lines', name: `${s.name} ⊥ (perpendicular)`,
+                                line: { color, width: 1.6 },
                                 legendgroup: s.name,
-                                hovertemplate: 'arc=%{x:.3f} m<br>signed dev=%{y:.2f} mm<extra></extra>',
+                                hovertemplate: 'arc=%{x:.3f} m<br>⊥ perp=%{y:.2f} mm<extra></extra>',
                             }, {
                                 x: pairs.map((p) => p.x),
-                                y: pairs.map((p) => p.abs),
-                                type: 'scatter', mode: 'lines', name: `${s.name} (abs 3D)`,
+                                y: pairs.map((p) => p.lateral),
+                                type: 'scatter', mode: 'lines', name: `${s.name} ⇄ lateral`,
+                                line: { color, width: 1.2, dash: 'dash' },
+                                legendgroup: s.name,
+                                showlegend: false,
+                                hovertemplate: 'arc=%{x:.3f} m<br>⇄ lateral=%{y:.2f} mm<extra></extra>',
+                            }, {
+                                x: pairs.map((p) => p.x),
+                                y: pairs.map((p) => p.total),
+                                type: 'scatter', mode: 'lines', name: `${s.name} |total|`,
                                 line: { color, width: 1, dash: 'dot' },
                                 legendgroup: s.name,
                                 showlegend: false,
-                                hovertemplate: 'arc=%{x:.3f} m<br>abs dev=%{y:.2f} mm<extra></extra>',
+                                hovertemplate: 'arc=%{x:.3f} m<br>|total|=%{y:.2f} mm<extra></extra>',
                             }];
                         });
+
+                        // Landmark markers along the X axis at y=0
+                        if (milestoneArcs.length > 0) {
+                            traces.push({
+                                x: milestoneArcs,
+                                y: milestoneArcs.map(() => 0),
+                                type: 'scatter', mode: 'markers+text',
+                                marker: { size: 9, color: 'rgba(0,0,0,0.6)', symbol: 'diamond-open' },
+                                text: milestoneArcs.map((_, i) => `M${i + 1}`),
+                                textposition: 'top center',
+                                textfont: { size: 10, color: 'rgba(0,0,0,0.7)' },
+                                name: 'Reference milestones',
+                                hovertemplate: 'milestone %{text}<br>arc=%{x:.3f} m<extra></extra>',
+                            });
+                        }
 
                         return (
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Solid line: signed perpendicular deviation (mm) using the captured surface normal. Dotted: absolute 3D distance. X = arclength along reference. Background tints show convex (red) vs concave (green) reference segments.
+                                    Each user point is projected onto the planned path. Solid = perpendicular (off-surface, +outward / −inward). Dashed = lateral (in-surface, sideways from path direction). Dotted = absolute 3D distance. Vertical lines and diamonds mark the planned milestones (M1…). Background tints: convex (red) vs concave (green) reference segments. X = arclength of the projected foot along the reference path; max ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
                                     layout={{
                                         ...layoutTheme,
                                         shapes: bgShapes,
-                                        xaxis: { title: 'Distance along Reference Path (m)' },
+                                        xaxis: { title: `Arclength along Reference Path (m) — total ${totalArc.toFixed(3)} m` },
                                         yaxis: { title: 'Deviation (mm)', zeroline: true, zerolinecolor: 'rgba(0,0,0,0.3)' },
                                         legend: { orientation: 'h', y: -0.2 },
                                     }}
-                                    useResizeHandler={true} style={{ width: '100%', height: '350px' }}
+                                    useResizeHandler={true} style={{ width: '100%', height: '380px' }}
                                 />
                             </div>
                         );

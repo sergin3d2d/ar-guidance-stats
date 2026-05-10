@@ -416,33 +416,40 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
             const transformed = transformDrawPoints(v.all_draw_points || [], transform);
             const withTime = normalizeTimestampsToSeconds(transformed);
             const ref = getRefData(meta.obstruction);
-            const deviations = computeDeviations(withTime, ref.path);
+            const deviations = computeDeviations(withTime, ref.path, ref.arclength);
+
+            const mean = (arr) => arr.reduce((s, x) => s + x, 0) / arr.length;
+            const std = (arr) => {
+                const mu = mean(arr);
+                return Math.sqrt(arr.reduce((s, x) => s + (x - mu) ** 2, 0) / arr.length);
+            };
+            const median = (arr) => arr.length % 2 ? arr[(arr.length - 1) / 2] : 0.5 * (arr[arr.length / 2 - 1] + arr[arr.length / 2]);
+            const rms = (arr) => Math.sqrt(mean(arr.map((x) => x * x)));
 
             // Per-trial summary
             if (settings.task2.deviationSummary) {
-                const valid = deviations.filter((d) => d && d.dist_3d_mm !== null);
+                const valid = deviations.filter((d) => d && d.dev_total_mm !== null);
                 if (valid.length > 0) {
-                    const dists = valid.map((d) => d.dist_3d_mm);
-                    const sortedD = dists.slice().sort((a, b) => a - b);
-                    const signed = valid.map((d) => d.dist_signed_mm);
-                    const mean = (arr) => arr.reduce((s, x) => s + x, 0) / arr.length;
-                    const std = (arr) => {
-                        const mu = mean(arr);
-                        return Math.sqrt(arr.reduce((s, x) => s + (x - mu) ** 2, 0) / arr.length);
-                    };
-                    const median = (arr) => arr.length % 2 ? arr[(arr.length - 1) / 2] : 0.5 * (arr[arr.length / 2 - 1] + arr[arr.length / 2]);
-                    const rms = Math.sqrt(mean(dists.map((x) => x * x)));
+                    const totals = valid.map((d) => d.dev_total_mm);
+                    const perps = valid.map((d) => d.dev_perp_mm);
+                    const laterals = valid.map((d) => d.dev_lateral_mm);
+                    const sortedT = totals.slice().sort((a, b) => a - b);
                     summaryRows.push({
                         ...baseKeys,
                         n_points: valid.length,
-                        dev_mean_mm: mean(dists),
-                        dev_median_mm: median(sortedD),
-                        dev_rms_mm: rms,
-                        dev_max_mm: Math.max(...dists),
-                        dev_std_mm: std(dists),
-                        dev_signed_mean_mm: mean(signed),
-                        frac_within_2mm: dists.filter((x) => x <= 2).length / dists.length,
-                        frac_within_5mm: dists.filter((x) => x <= 5).length / dists.length,
+                        dev_total_mean_mm: mean(totals),
+                        dev_total_median_mm: median(sortedT),
+                        dev_total_rms_mm: rms(totals),
+                        dev_total_max_mm: Math.max(...totals),
+                        dev_total_std_mm: std(totals),
+                        dev_perp_mean_mm: mean(perps),
+                        dev_perp_rms_mm: rms(perps),
+                        dev_perp_signed_mean_mm: mean(perps),
+                        dev_lateral_mean_mm: mean(laterals),
+                        dev_lateral_rms_mm: rms(laterals),
+                        dev_lateral_signed_mean_mm: mean(laterals),
+                        frac_within_2mm: totals.filter((x) => x <= 2).length / totals.length,
+                        frac_within_5mm: totals.filter((x) => x <= 5).length / totals.length,
                     });
                 }
             }
@@ -452,17 +459,17 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                 const nBins = Math.max(2, settings.task2.deviationProfileBins | 0);
                 const totalArc = ref.arclength[ref.arclength.length - 1] || 1;
                 const bins = Array.from({ length: nBins }, () => ({
-                    sum: 0, max: 0, signedSum: 0, n: 0,
+                    totalSum: 0, totalMax: 0, perpSum: 0, latSum: 0, n: 0,
                 }));
                 for (const d of deviations) {
-                    if (!d || d.dist_3d_mm === null) continue;
-                    const arc = ref.arclength[d.closest_ref_index] || 0;
-                    let binIdx = Math.floor((arc / totalArc) * nBins);
+                    if (!d || d.dev_total_mm === null) continue;
+                    let binIdx = Math.floor((d.arclength_m / totalArc) * nBins);
                     if (binIdx >= nBins) binIdx = nBins - 1;
                     if (binIdx < 0) binIdx = 0;
-                    bins[binIdx].sum += d.dist_3d_mm;
-                    bins[binIdx].max = Math.max(bins[binIdx].max, d.dist_3d_mm);
-                    bins[binIdx].signedSum += d.dist_signed_mm;
+                    bins[binIdx].totalSum += d.dev_total_mm;
+                    bins[binIdx].totalMax = Math.max(bins[binIdx].totalMax, d.dev_total_mm);
+                    bins[binIdx].perpSum += d.dev_perp_mm;
+                    bins[binIdx].latSum += d.dev_lateral_mm;
                     bins[binIdx].n += 1;
                 }
                 bins.forEach((b, i) => {
@@ -472,9 +479,10 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         bin_index: i,
                         bin_path_distance_m: ((i + 0.5) / nBins) * totalArc,
                         bin_n_points: b.n,
-                        dev_mean_mm: b.sum / b.n,
-                        dev_max_mm: b.max,
-                        dev_signed_mean_mm: b.signedSum / b.n,
+                        dev_total_mean_mm: b.totalSum / b.n,
+                        dev_total_max_mm: b.totalMax,
+                        dev_perp_mean_mm: b.perpSum / b.n,
+                        dev_lateral_mean_mm: b.latSum / b.n,
                     });
                 });
             }
@@ -492,8 +500,10 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         x_local_mm: p.x * 1000,
                         y_local_mm: p.y * 1000,
                         z_local_mm: p.z * 1000,
-                        dist_to_closest_ref_mm: d?.dist_3d_mm ?? '',
-                        closest_ref_index: d?.closest_ref_index ?? '',
+                        ref_arclength_m: d?.arclength_m ?? '',
+                        dev_total_mm: d?.dev_total_mm ?? '',
+                        dev_perp_mm: d?.dev_perp_mm ?? '',
+                        dev_lateral_mm: d?.dev_lateral_mm ?? '',
                     });
                 }
             }

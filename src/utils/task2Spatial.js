@@ -205,45 +205,119 @@ export const cumulativeArclength = (points) => {
     return out;
 };
 
-// For each transformed user point, find the nearest ref-path point.
-// Returns one entry per user point: { closest_ref_index, dist_3d_mm, dist_signed_mm }.
-// Signed distance uses the user-point surface normal when available (preferred);
-// falls back to the local-Y component otherwise. Skips line-break points.
-export const computeDeviations = (transformedPoints, refPoints) => {
+// Project a single 3D point onto a reference polyline, returning the closest
+// foot point and decomposed deviation. Uses true closest-segment projection,
+// not closest-vertex (handles sparse references correctly).
+//
+// Decomposition at the foot F:
+//   T (tangent)   = normalized segment direction
+//   N (normal)    = user point's surface normal if available, else cross of
+//                   adjacent ref segments (estimates surface normal from path)
+//   B (binormal)  = T × N (in-surface, perpendicular to the path direction)
+//
+//   dev_perp     = (P - F) · N    → off-surface, signed (+ outward / − inward)
+//   dev_lateral  = (P - F) · B    → in-surface sideways, signed
+//   dev_total    = |P - F|        → 3D Euclidean
+const projectOntoPolyline = (p, refPoints, refArclength) => {
+    let bestSegIdx = -1;
+    let bestT = 0;
+    let bestFoot = null;
+    let bestSq = Infinity;
+
+    for (let i = 0; i < refPoints.length - 1; i++) {
+        const a = refPoints[i];
+        const b = refPoints[i + 1];
+        if (a.x === null || b.x === null) continue;
+        const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+        const segLenSq = abx * abx + aby * aby + abz * abz;
+        if (segLenSq < 1e-12) continue;
+        const apx = p.x - a.x, apy = p.y - a.y, apz = p.z - a.z;
+        let t = (apx * abx + apy * aby + apz * abz) / segLenSq;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const fx = a.x + t * abx, fy = a.y + t * aby, fz = a.z + t * abz;
+        const dx = p.x - fx, dy = p.y - fy, dz = p.z - fz;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bestSq) {
+            bestSq = d;
+            bestSegIdx = i;
+            bestT = t;
+            bestFoot = { x: fx, y: fy, z: fz, abx, aby, abz, segLen: Math.sqrt(segLenSq) };
+        }
+    }
+    return { segIdx: bestSegIdx, t: bestT, foot: bestFoot, distSq: bestSq };
+};
+
+// For each transformed user point, project onto the reference polyline.
+// Returns per-point: arclength of foot (m), perp/lateral/total deviation (mm),
+// and metadata for export.
+export const computeDeviations = (transformedPoints, refPoints, refArclength) => {
     const out = new Array(transformedPoints.length);
     for (let i = 0; i < transformedPoints.length; i++) {
         const p = transformedPoints[i];
         if (p.is_line_break) {
-            out[i] = { closest_ref_index: null, dist_3d_mm: null, dist_signed_mm: null };
+            out[i] = {
+                seg_index: null, arclength_m: null,
+                dev_total_mm: null, dev_perp_mm: null, dev_lateral_mm: null,
+            };
             continue;
         }
-        let minSq = Infinity;
-        let closest = 0;
-        for (let j = 0; j < refPoints.length; j++) {
-            const r = refPoints[j];
-            if (r.x === null) continue;
-            const dx = p.x - r.x;
-            const dy = p.y - r.y;
-            const dz = p.z - r.z;
-            const d = dx * dx + dy * dy + dz * dz;
-            if (d < minSq) { minSq = d; closest = j; }
+
+        const proj = projectOntoPolyline(p, refPoints, refArclength);
+        if (proj.segIdx < 0) {
+            out[i] = {
+                seg_index: null, arclength_m: null,
+                dev_total_mm: null, dev_perp_mm: null, dev_lateral_mm: null,
+            };
+            continue;
         }
-        const r = refPoints[closest];
-        const dx = p.x - r.x;
-        const dy = p.y - r.y;
-        const dz = p.z - r.z;
-        const dist3d = Math.sqrt(minSq);
-        let signed;
+
+        const F = proj.foot;
+        const dx = p.x - F.x, dy = p.y - F.y, dz = p.z - F.z;
+        const distTotal = Math.sqrt(proj.distSq);
+
+        // Tangent
+        const tlen = F.segLen;
+        const tx = F.abx / tlen, ty = F.aby / tlen, tz = F.abz / tlen;
+
+        // Normal at F: prefer user point's captured normal (it's on the surface);
+        // fall back to estimating from the path itself (cross of adjacent tangents).
+        let nx, ny, nz;
         if (p.nx !== null && p.ny !== null && p.nz !== null) {
             const nLen = Math.hypot(p.nx, p.ny, p.nz) || 1;
-            signed = (dx * p.nx + dy * p.ny + dz * p.nz) / nLen;
+            nx = p.nx / nLen; ny = p.ny / nLen; nz = p.nz / nLen;
+            // Orthogonalize against tangent so decomposition is clean.
+            const dotTN = nx * tx + ny * ty + nz * tz;
+            nx -= dotTN * tx; ny -= dotTN * ty; nz -= dotTN * tz;
+            const renorm = Math.hypot(nx, ny, nz) || 1;
+            nx /= renorm; ny /= renorm; nz /= renorm;
         } else {
-            signed = dy;
+            // Fallback: a perpendicular-to-tangent direction in the plane of
+            // the largest deviation component. Usable, less anchored to reality.
+            // Pick world-Y if not parallel to tangent, else world-Z.
+            let upx = 0, upy = 1, upz = 0;
+            if (Math.abs(tx * upx + ty * upy + tz * upz) > 0.95) { upx = 0; upy = 0; upz = 1; }
+            const dotTU = tx * upx + ty * upy + tz * upz;
+            nx = upx - dotTU * tx; ny = upy - dotTU * ty; nz = upz - dotTU * tz;
+            const renorm = Math.hypot(nx, ny, nz) || 1;
+            nx /= renorm; ny /= renorm; nz /= renorm;
         }
+
+        // Binormal = T × N
+        const bx = ty * nz - tz * ny;
+        const by = tz * nx - tx * nz;
+        const bz = tx * ny - ty * nx;
+
+        const devPerp = dx * nx + dy * ny + dz * nz;
+        const devLateral = dx * bx + dy * by + dz * bz;
+
+        const arc = (refArclength?.[proj.segIdx] ?? 0) + proj.t * tlen;
+
         out[i] = {
-            closest_ref_index: closest,
-            dist_3d_mm: dist3d * 1000,
-            dist_signed_mm: signed * 1000,
+            seg_index: proj.segIdx,
+            arclength_m: arc,
+            dev_total_mm: distTotal * 1000,
+            dev_perp_mm: devPerp * 1000,
+            dev_lateral_mm: devLateral * 1000,
         };
     }
     return out;

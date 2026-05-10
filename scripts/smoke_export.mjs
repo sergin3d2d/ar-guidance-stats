@@ -61,13 +61,14 @@ for (const rf of rawFiles) {
     }
 }
 
-console.log('\n--- Task 2 alignment & deviation summary (all trials) ---');
+console.log('\n--- Task 2 alignment & deviation decomposition (all trials) ---');
 const visibleRef = parseReferenceTxt(visibleTxt);
 const obstructRef = parseReferenceTxt(obstructTxt);
 visibleRef.arclength = cumulativeArclength(visibleRef.path);
 obstructRef.arclength = cumulativeArclength(obstructRef.path);
 console.log(`  Visible ref: ${visibleRef.path.length} pts, total arclength ${visibleRef.arclength[visibleRef.arclength.length - 1].toFixed(3)} m`);
 console.log(`  Obstruct ref: ${obstructRef.path.length} pts, total arclength ${obstructRef.arclength[obstructRef.arclength.length - 1].toFixed(3)} m`);
+console.log('  device      cond     align  n     arc_min  arc_max  perp_rms  lat_rms  total_max');
 
 for (const rf of rawFiles) {
     const meta = parseFilenameMetadata(rf.filename);
@@ -78,15 +79,14 @@ for (const rf of rawFiles) {
     const transformed = transformDrawPoints(v.all_draw_points, transform);
     const ref = meta.obstruction.toLowerCase().includes('obstruct') ? obstructRef : visibleRef;
     const offset = measureAlignmentOffset(transformed, ref.path);
-    const devs = computeDeviations(transformed, ref.path);
-    const valid = devs.filter((d) => d?.dist_3d_mm !== null);
-    const dists = valid.map((d) => d.dist_3d_mm);
-    const mean = dists.reduce((s, x) => s + x, 0) / dists.length;
-    const max = Math.max(...dists);
-    const rms = Math.sqrt(dists.reduce((s, x) => s + x * x, 0) / dists.length);
-    const signed = valid.map((d) => d.dist_signed_mm);
-    const meanSigned = signed.reduce((s, x) => s + x, 0) / signed.length;
-    console.log(`  ${meta.deviceRaw.padEnd(11)} ${meta.obstruction.padEnd(8)}: align=${offset.toFixed(1).padStart(5)}mm  n=${String(valid.length).padStart(4)}  mean=${mean.toFixed(2).padStart(6)}  rms=${rms.toFixed(2).padStart(6)}  max=${max.toFixed(2).padStart(7)}  signed_mean=${meanSigned.toFixed(2).padStart(6)}`);
+    const devs = computeDeviations(transformed, ref.path, ref.arclength);
+    const valid = devs.filter((d) => d?.dev_total_mm !== null);
+    const totals = valid.map((d) => d.dev_total_mm);
+    const perps = valid.map((d) => d.dev_perp_mm);
+    const laterals = valid.map((d) => d.dev_lateral_mm);
+    const arcs = valid.map((d) => d.arclength_m);
+    const rms = (a) => Math.sqrt(a.reduce((s, x) => s + x * x, 0) / a.length);
+    console.log(`  ${meta.deviceRaw.padEnd(11)} ${meta.obstruction.padEnd(8)}: ${offset.toFixed(1).padStart(5)}mm  n=${String(valid.length).padStart(4)}  arc=[${Math.min(...arcs).toFixed(3)}..${Math.max(...arcs).toFixed(3)}]m  perp_rms=${rms(perps).toFixed(2).padStart(5)}  lat_rms=${rms(laterals).toFixed(2).padStart(5)}  total_max=${Math.max(...totals).toFixed(2).padStart(6)}`);
 }
 
 console.log('\n--- Task 3 sample row ---');
