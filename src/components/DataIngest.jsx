@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { processExperimentData } from '../utils/dataProcessor';
+import { processExperimentData, parseFilenameMetadata } from '../utils/dataProcessor';
 
 const DataIngest = ({ onDataLoaded }) => {
     const [loading, setLoading] = useState(false);
-    const [fileCount, setFileCount] = useState(0);
+    const [progress, setProgress] = useState({ jsonCount: 0, csvCount: 0, pidCount: 0, pids: [] });
 
     const handleFolderSelect = async (e) => {
         const files = Array.from(e.target.files);
@@ -12,8 +12,20 @@ const DataIngest = ({ onDataLoaded }) => {
 
         if (jsonFiles.length === 0) return;
 
+        // Pre-scan filenames to show participant count before parsing JSON.
+        const detectedPids = new Set();
+        for (const f of jsonFiles) {
+            const meta = parseFilenameMetadata(f.name);
+            if (meta) detectedPids.add(meta.pid);
+        }
+
         setLoading(true);
-        setFileCount(jsonFiles.length + csvFiles.length);
+        setProgress({
+            jsonCount: jsonFiles.length,
+            csvCount: csvFiles.length,
+            pidCount: detectedPids.size,
+            pids: Array.from(detectedPids).sort((a, b) => parseInt(a, 10) - parseInt(b, 10)),
+        });
 
         try {
             const dataPromises = jsonFiles.map(file => {
@@ -44,7 +56,6 @@ const DataIngest = ({ onDataLoaded }) => {
             const rawFiles = (await Promise.all(dataPromises)).filter(d => d !== null);
             const csvData = await Promise.all(csvPromises);
 
-            // Pass JSON contents (without filename wrapper) to legacy processor.
             const allData = rawFiles.map(f => f.json);
             const processed = processExperimentData(allData, csvData);
             onDataLoaded(processed, rawFiles, csvData);
@@ -57,8 +68,12 @@ const DataIngest = ({ onDataLoaded }) => {
 
     return (
         <div className="glass-card" style={{ marginBottom: '24px', textAlign: 'center' }}>
-            <h3 style={{ marginTop: 0 }}>Step 1: Ingest Experimental Folders</h3>
-            <p className="stat-label">Select the directory containing participant JSON logs</p>
+            <h3 style={{ marginTop: 0 }}>Step 1: Ingest Experimental Data</h3>
+            <p className="stat-label">
+                Select <strong>one participant folder</strong> (e.g. <code>P01/</code>) <strong>or</strong> a parent folder
+                containing multiple participants (e.g. <code>data/</code> with <code>P01/, P02/, P03/, …</code> inside).
+                All JSONs and result CSVs found anywhere in the selected tree are processed together.
+            </p>
 
             <div style={{ margin: '20px 0' }}>
                 <input
@@ -71,10 +86,25 @@ const DataIngest = ({ onDataLoaded }) => {
                 />
             </div>
 
-            {loading && <p className="stat-label" style={{ color: '#00f2ff' }}>Analyzing {fileCount} data points...</p>}
+            {loading && (
+                <p className="stat-label" style={{ color: '#00f2ff' }}>
+                    Parsing {progress.jsonCount} JSON + {progress.csvCount} CSV files
+                    {' '}from {progress.pidCount} participant{progress.pidCount === 1 ? '' : 's'}…
+                </p>
+            )}
 
-            {!loading && fileCount > 0 && (
-                <p className="stat-label" style={{ color: '#00f2ff' }}>✓ {fileCount} files successfully parsed</p>
+            {!loading && progress.jsonCount > 0 && (
+                <div style={{ color: '#00f2ff' }}>
+                    <p className="stat-label" style={{ margin: '4px 0' }}>
+                        ✓ Loaded {progress.jsonCount} JSON + {progress.csvCount} CSV
+                        {' '}from {progress.pidCount} participant{progress.pidCount === 1 ? '' : 's'}
+                    </p>
+                    {progress.pids.length > 0 && (
+                        <p className="stat-label" style={{ margin: '4px 0', fontSize: '0.75rem' }}>
+                            Participants: {progress.pids.map((p) => `P${String(p).padStart(2, '0')}`).join(', ')}
+                        </p>
+                    )}
+                </div>
             )}
         </div>
     );

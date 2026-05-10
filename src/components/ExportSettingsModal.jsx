@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { X, Download, Settings as SettingsIcon } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { X, Download, Settings as SettingsIcon, Users } from 'lucide-react';
 import { DEFAULT_EXPORT_SETTINGS, buildExportArchive, downloadBlob } from '../utils/exportPlanner';
+import { parseFilenameMetadata } from '../utils/dataProcessor';
 
 const Toggle = ({ label, value, onChange, hint }) => (
     <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '6px 0', cursor: 'pointer' }}>
@@ -55,6 +56,25 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState(null);
     const [lastSummary, setLastSummary] = useState(null);
+
+    // Summarize the loaded dataset so the user knows what's about to be exported.
+    const datasetInfo = useMemo(() => {
+        const pids = new Set();
+        const taskCounts = { 1: 0, 2: 0, 3: 0 };
+        for (const rf of rawFiles || []) {
+            const meta = parseFilenameMetadata(rf.filename);
+            if (!meta) continue;
+            pids.add(meta.pid);
+            if (taskCounts[meta.taskNum] !== undefined) taskCounts[meta.taskNum]++;
+        }
+        return {
+            pidCount: pids.size,
+            pids: Array.from(pids).sort((a, b) => parseInt(a, 10) - parseInt(b, 10)),
+            jsonCount: rawFiles?.length || 0,
+            csvCount: csvFiles?.length || 0,
+            taskCounts,
+        };
+    }, [rawFiles, csvFiles]);
 
     const update = (path) => (val) => {
         setSettings((prev) => {
@@ -114,9 +134,34 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                 </div>
 
                 <div style={{ padding: '20px 24px' }}>
-                    <p style={{ fontSize: '0.88rem', color: 'var(--text-dim)', marginTop: 0, marginBottom: '20px' }}>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--text-dim)', marginTop: 0, marginBottom: '12px' }}>
                         Produces a zip of long-format CSVs (one row per trial / landmark / axis / item) plus a README. Suitable for direct ingestion into R.
                     </p>
+
+                    <div
+                        style={{
+                            display: 'flex', alignItems: 'flex-start', gap: '10px',
+                            padding: '12px 14px', marginBottom: '20px',
+                            background: 'rgba(0, 136, 204, 0.08)',
+                            border: '1px solid rgba(0, 136, 204, 0.25)',
+                            borderRadius: '8px', fontSize: '0.88rem',
+                        }}
+                    >
+                        <Users size={18} color="var(--primary)" style={{ flexShrink: 0, marginTop: '1px' }} />
+                        <div style={{ flex: 1 }}>
+                            <div style={{ color: 'var(--text)', marginBottom: '4px' }}>
+                                <strong>{datasetInfo.pidCount} participant{datasetInfo.pidCount === 1 ? '' : 's'}</strong>
+                                {' '}loaded — {datasetInfo.jsonCount} JSON files, {datasetInfo.csvCount} CSVs.
+                                {' '}Task counts: T1={datasetInfo.taskCounts[1]}, T2={datasetInfo.taskCounts[2]}, T3={datasetInfo.taskCounts[3]}.
+                            </div>
+                            {datasetInfo.pids.length > 0 && (
+                                <div style={{ color: 'var(--text-dim)', fontSize: '0.78rem' }}>
+                                    {datasetInfo.pids.map((p) => `P${String(p).padStart(2, '0')}`).join(', ')}
+                                    {' '}— all included in the export.
+                                </div>
+                            )}
+                        </div>
+                    </div>
 
                     <Section title="Provenance columns (off by default)">
                         <Toggle
