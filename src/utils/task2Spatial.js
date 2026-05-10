@@ -148,6 +148,31 @@ const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, corn
     return cur;
 };
 
+// Drop tiny segments (between null breaks) below a minimum point count.
+// After sorting, fly-away clusters appear as 1-3 point segments separated
+// from the main path by breaks. Real path sections have hundreds of points.
+const dropTinySegments = (points, minSegmentPoints = 10) => {
+    // Walk through; collect points belonging to segments above threshold.
+    const out = [];
+    let segStart = 0;
+    let inSeg = false;
+    for (let i = 0; i <= points.length; i++) {
+        const isBreak = i === points.length || points[i].x === null;
+        if (isBreak) {
+            if (inSeg) {
+                const segLen = i - segStart;
+                if (segLen >= minSegmentPoints) {
+                    for (let j = segStart; j < i; j++) out.push(points[j]);
+                }
+                inSeg = false;
+            }
+        } else {
+            if (!inSeg) { segStart = i; inSeg = true; }
+        }
+    }
+    return out;  // breaks not preserved — caller will re-sort
+};
+
 // Remove spike/fly-away points: a point whose direction vectors to its
 // neighbors nearly reverse (cos angle < cosThreshold) is a path that doubled
 // back to a stray point. Iterate until stable.
@@ -330,10 +355,13 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
     return { points: pointsOut, arclength };
 };
 
-// Original algorithm: voxel downsample (1mm) → nearest-neighbor sort →
-// corner-preserving smoothing (10 iterations, window 3, cornerCos 0.70).
-// No outlier removal. This is the version the user accepted as visually
-// correct in Maya at the start.
+// Original algorithm + iterative fly-away removal:
+//   1. voxel downsample (1mm)
+//   2. nearest-neighbor sort → polyline split into segments by 15mm breaks
+//   3. drop segments below minSegmentPoints (those are fly-away clusters)
+//   4. re-sort the kept points — without fly-aways to detour to, the sort
+//      produces a continuous chain (or far fewer breaks)
+//   5. corner-preserving smoothing
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
         smooth = true,
@@ -341,8 +369,8 @@ export const parseReferenceTxt = (txt, options = {}) => {
         smoothWindow = 3,
         smoothCornerCos = 0.70,
         smoothCornerLookahead = 4,
-        removeOutliers = false,
         voxelMeters = 0.001,
+        minSegmentPoints = 10,  // segments with fewer points are fly-away clusters
     } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
@@ -359,9 +387,20 @@ export const parseReferenceTxt = (txt, options = {}) => {
         }
     }
     const downsampled = downsampleVoxel(pathRaw, voxelMeters);
-    const sorted = sortNearestNeighbor(downsampled);
-    const cleaned = removeOutliers ? removeOutlierSpikes(sorted) : sorted;
-    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, smoothIterations, smoothWindow, smoothCornerCos, smoothCornerLookahead) : cleaned;
+    // Iteratively sort + drop tiny (fly-away) segments until stable.
+    // Each iteration may expose new fly-aways that were hidden inside
+    // a larger detour cluster.
+    let working = downsampled;
+    for (let iter = 0; iter < 5; iter++) {
+        const sortedIter = sortNearestNeighbor(working);
+        const cleaned = dropTinySegments(sortedIter, minSegmentPoints);
+        if (cleaned.length === working.length) { working = sortedIter; break; }
+        working = cleaned;
+    }
+    const sorted = working[0]?.x === undefined ? working : sortNearestNeighbor(working);
+    const finalPath = smooth
+        ? smoothPathPreserveCorners(sorted, smoothIterations, smoothWindow, smoothCornerCos, smoothCornerLookahead)
+        : sorted;
     const milestones = clusterMilestones(milestonesRaw, 0.003);
     return { path: finalPath, milestones };
 };
