@@ -232,14 +232,11 @@ const removeOutliersByLocalMedian = (points, windowSize = 6, distThresholdMeters
 };
 
 // Analytical reference: ordered points + arclength using the .txt file's
-// native row order, which IS the path-walking order for these data files
-// (verified: median row-to-row distance 0.5mm). No nearest-neighbor sort,
-// so the arclengths reflect true path traversal — distinct spheres get
-// distinct arclength positions.
-//
-// Used by the Path Deviation Profile chart for X-axis arclength and
-// milestone X positions. The visual / Maya polyline still comes from
-// parseReferenceTxt (nearest-neighbor + smoothed for visual continuity).
+// native row order. Inserts visual breaks (null points) where consecutive
+// rows jump significantly — these jumps are NOT path-walking, they're the
+// extraction tool jumping between sections of the painted line. Without
+// breaks, drawing the points as a single polyline produces crisscrossing
+// shortcut lines across the surface (visible in Maya).
 export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
     const {
         voxelMeters = 0.002,            // light voxel collapse to remove duplicate samples
@@ -247,8 +244,8 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
         smoothWindow = 3,               // moving-average half-window
         outlierWindow = 6,              // half-window for local-median outlier check
         outlierThresholdMeters = 0.008, // distance from local median above which a point is a fly-away
-        strokeBreakMeters = 0.05,       // row-to-row distance above which a jump is treated as a stroke break
-                                        // (excluded from arclength)
+        breakJumpMeters = 0.005,        // row-to-row distance above which a jump is a section-jump
+                                        // (excluded from arclength AND inserted as a polyline break)
     } = options;
     if (!txt) return { points: [], arclength: [] };
 
@@ -299,19 +296,38 @@ export const parseReferenceTxtForAnalysis = (txt, options = {}) => {
     // Outlier removal — drop floating points that don't sit on the trace
     pts = removeOutliersByLocalMedian(pts, outlierWindow, outlierThresholdMeters);
 
-    // Cumulative arclength, excluding jumps that look like stroke breaks
-    const arclength = [0];
+    // Walk through points; insert null breaks at jumps and compute arclength
+    // only along contiguous (non-jump) segments. The resulting polyline draws
+    // as visually disconnected segments at section transitions instead of
+    // crisscrossing the surface with shortcut lines.
+    const pointsOut = [];
+    const arclength = [];
     let total = 0;
-    for (let i = 1; i < pts.length; i++) {
+    for (let i = 0; i < pts.length; i++) {
+        if (i === 0) {
+            pointsOut.push(pts[i]);
+            arclength.push(0);
+            continue;
+        }
         const dx = pts[i].x - pts[i - 1].x;
         const dy = pts[i].y - pts[i - 1].y;
         const dz = pts[i].z - pts[i - 1].z;
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d < strokeBreakMeters) total += d;
-        arclength.push(total);
+        if (d > breakJumpMeters) {
+            // Jump — insert visual break and skip arclength contribution
+            pointsOut.push({ x: null, y: null, z: null });
+            arclength.push(total);
+            // The jumped-to point starts a new contiguous segment
+            pointsOut.push(pts[i]);
+            arclength.push(total);
+        } else {
+            total += d;
+            pointsOut.push(pts[i]);
+            arclength.push(total);
+        }
     }
 
-    return { points: pts, arclength };
+    return { points: pointsOut, arclength };
 };
 
 export const parseReferenceTxt = (txt, options = {}) => {
