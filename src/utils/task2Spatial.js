@@ -111,13 +111,13 @@ const sortNearestNeighbor = (points, threshold = 0.015) => {
     return findPath(firstPass[validEnd] || points[0]);
 };
 
-const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, cornerCos = 0.95) => {
+const smoothPathPreserveCorners = (points, iterations = 10, windowSize = 3, cornerCos = 0.85, cornerLookahead = 8) => {
     let cur = points.slice();
     const corners = new Array(points.length).fill(false);
     for (let i = 0; i < points.length; i++) {
         if (points[i].x === null) continue;
-        const prev = Math.max(0, i - 4);
-        const next = Math.min(points.length - 1, i + 4);
+        const prev = Math.max(0, i - cornerLookahead);
+        const next = Math.min(points.length - 1, i + cornerLookahead);
         if (points[prev].x === null || points[next].x === null || i === 0 || i === points.length - 1) {
             corners[i] = true;
             continue;
@@ -202,12 +202,13 @@ const clusterMilestones = (points, threshold = 0.003) => {
 
 export const parseReferenceTxt = (txt, options = {}) => {
     const {
-        smooth = true,           // apply corner-preserving smoothing pass
-        smoothIterations = 20,   // smoothing passes (higher = smoother straight runs)
-        smoothWindow = 5,        // moving-average half-window in points
-        smoothCornerCos = 0.95,  // dot threshold below which a point is treated as a corner (preserved)
-        removeOutliers = true,   // strip spike/fly-away points after sorting
-        voxelMeters = 0.001,     // pre-sort voxel-downsample edge length
+        smooth = true,             // apply corner-preserving smoothing pass
+        smoothIterations = 20,     // smoothing passes (higher = smoother straight runs)
+        smoothWindow = 5,          // moving-average half-window in points
+        smoothCornerCos = 0.85,    // dot threshold below which a point is treated as a corner (preserved). Lower = fewer corners detected = more smoothing.
+        smoothCornerLookahead = 8, // how many points each side to look for the corner check. Wider = less noise-sensitive.
+        removeOutliers = true,     // strip spike/fly-away points after sorting
+        voxelMeters = 0.001,       // pre-sort voxel-downsample edge length
     } = options;
     if (!txt) return { path: [], milestones: [] };
     const pathRaw = [];
@@ -226,7 +227,7 @@ export const parseReferenceTxt = (txt, options = {}) => {
     const downsampled = downsampleVoxel(pathRaw, voxelMeters);
     const sorted = sortNearestNeighbor(downsampled);
     const cleaned = removeOutliers ? removeOutlierSpikes(sorted) : sorted;
-    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, smoothIterations, smoothWindow, smoothCornerCos) : cleaned;
+    const finalPath = smooth ? smoothPathPreserveCorners(cleaned, smoothIterations, smoothWindow, smoothCornerCos, smoothCornerLookahead) : cleaned;
     const milestones = clusterMilestones(milestonesRaw, 0.003);
     return { path: finalPath, milestones };
 };
