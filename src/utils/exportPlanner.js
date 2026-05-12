@@ -556,13 +556,97 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
     return tables;
 };
 
+// --- Questionnaire metadata (single source of truth) -----------------------
+// Text matches the dashboard's SurveyAnalytics labels and the experiment's
+// methods documentation. NASA-TLX uses a 0-100 visual analog scale;
+// PCUE-Q uses a 1-5 Likert scale. Reverse-scored items have negatively
+// phrased prompts where a high raw value indicates worse performance.
+
+const NASA_TLX_QUESTIONS = {
+    q0: { short: 'Mental Demand',   text: 'Mental Demand' },
+    q1: { short: 'Physical Demand', text: 'Physical Demand' },
+    q2: { short: 'Temporal Demand', text: 'Temporal Demand' },
+    q3: { short: 'Performance',     text: 'Performance' },
+    q4: { short: 'Effort',          text: 'Effort' },
+    q5: { short: 'Frustration',     text: 'Frustration' },
+};
+const NASA_TLX_REVERSE = new Set([]);  // 0-100 raw; no items are flipped here
+const NASA_TLX_SCALE = { min: 0, max: 100, type: 'interval' };
+
+const PCUEQ_QUESTIONS = {
+    A1: { category: 'Usability & Helpfulness',         text: 'I found the guidance system was easy to use.' },
+    A2: { category: 'Usability & Helpfulness',         text: 'The information provided by the guidance system was easy to understand.' },
+    A3: { category: 'Usability & Helpfulness',         text: "I felt confident in completing the tasks using this system's guidance." },
+    A4: { category: 'Usability & Helpfulness',         text: 'I think I would need a lot of practice to become skillful with this system.' },
+    A5: { category: 'Usability & Helpfulness',         text: 'I felt the guidance was helpful for performing the tasks accurately.' },
+    B1: { category: 'Visual Quality & Perception',     text: 'The virtual guides (e.g., paths, outlines) appeared clear and sharp.' },
+    B2: { category: 'Visual Quality & Perception',     text: 'I was able to comfortably focus on both the virtual guides and the physical task objects at the same time.' },
+    B3: { category: 'Visual Quality & Perception',     text: 'I perceived the virtual guides as stable and correctly positioned over the physical world.' },
+    B4: { category: 'Visual Quality & Perception',     text: 'The virtual guides made it easy to judge the depth and position of targets.' },
+    B5: { category: 'Visual Quality & Perception',     text: 'The virtual content occluding my view of the tool/hand did not significantly disrupt my performance.' },
+    B6: { category: 'Visual Quality & Perception',     text: 'The overall visual display (brightness, resolution, field of view) was satisfactory for performing the tasks.' },
+    C1: { category: 'Physical & Visual Comfort',       text: 'Using this system for the duration of the tasks caused significant eye strain or fatigue.' },
+    C2: { category: 'Physical & Visual Comfort',       text: 'I experienced feelings of dizziness, headache, or nausea while using this system.' },
+    C3: { category: 'Physical & Visual Comfort',       text: 'I did not perceive any distracting blur or double vision.' },
+    C4: { category: 'Physical & Visual Comfort',       text: 'The headset was physically comfortable to wear during the tasks.' },
+    D1: { category: 'Overall Experience & Affect',     text: 'I felt frustrated or annoyed while performing the tasks with this system.' },
+    D2: { category: 'Overall Experience & Affect',     text: 'Overall, I was satisfied with this guidance system.' },
+};
+const PCUEQ_REVERSE = new Set(['A4', 'C1', 'C2', 'D1']);  // matches dashboard isReverseScored
+const PCUEQ_AR_ONLY = new Set(['B5', 'C4']);              // not applicable to On-Screen viewing
+const PCUEQ_SCALE = { min: 1, max: 5, type: 'likert' };
+
+const buildQuestionsDictionary = () => {
+    const rows = [];
+    for (const [k, q] of Object.entries(NASA_TLX_QUESTIONS)) {
+        rows.push({
+            questionnaire: 'nasa_tlx', key: k,
+            category: 'Workload',
+            question_text: q.text,
+            scale_type: NASA_TLX_SCALE.type,
+            scale_min: NASA_TLX_SCALE.min,
+            scale_max: NASA_TLX_SCALE.max,
+            is_reverse_scored: NASA_TLX_REVERSE.has(k) ? 1 : 0,
+            ar_only: 0,
+        });
+    }
+    for (const [k, q] of Object.entries(PCUEQ_QUESTIONS)) {
+        rows.push({
+            questionnaire: 'pcueq', key: k,
+            category: q.category,
+            question_text: q.text,
+            scale_type: PCUEQ_SCALE.type,
+            scale_min: PCUEQ_SCALE.min,
+            scale_max: PCUEQ_SCALE.max,
+            is_reverse_scored: PCUEQ_REVERSE.has(k) ? 1 : 0,
+            ar_only: PCUEQ_AR_ONLY.has(k) ? 1 : 0,
+        });
+    }
+    return {
+        headers: ['questionnaire', 'key', 'category', 'question_text', 'scale_type', 'scale_min', 'scale_max', 'is_reverse_scored', 'ar_only'],
+        rows,
+    };
+};
+
+// Apply reverse-scoring transformation. Returns the value already in
+// "higher = better" orientation. Raw value preserved separately by caller.
+const reverseValueFor = (questionnaire, key, value) => {
+    if (value === '' || value === null || value === undefined) return '';
+    const num = typeof value === 'number' ? value : parseFloat(value);
+    if (isNaN(num)) return '';
+    if (questionnaire === 'pcueq' && PCUEQ_REVERSE.has(key)) {
+        return PCUEQ_SCALE.min + PCUEQ_SCALE.max - num;
+    }
+    if (questionnaire === 'nasa_tlx' && NASA_TLX_REVERSE.has(key)) {
+        return NASA_TLX_SCALE.min + NASA_TLX_SCALE.max - num;
+    }
+    return num;
+};
+
 // --- Questionnaires ---------------------------------------------------------
 
 const buildQuestionnaireTable = (csvFilesList, conditionOrder, settings) => {
     if (!settings.questionnaires.include || !csvFilesList) return null;
-    const arOnlyKeys = new Set(
-        String(settings.questionnaires.arOnlyKeys || '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-    );
     const rows = [];
 
     for (const csv of csvFilesList) {
@@ -580,60 +664,73 @@ const buildQuestionnaireTable = (csvFilesList, conditionOrder, settings) => {
         if (!pid) continue;
 
         const skipKeys = new Set(['participant_id', 'condition', 'dominant_hand', 'age_group', 'ipd', 'previous_ar_experience', 'vision_test_score']);
-
-        // Aggregate per (questionnaire, condition) for NASA-TLX overall
-        const tlxScores = {}; // condition → { sum, n }
+        const tlxScoresReversed = {};  // condition → { sum, n } over value_reversed
 
         for (const r of parsed) {
             if (skipKeys.has(r.key)) continue;
             if (r.questionnaire === 'pre_experiment' || r.questionnaire === 'final_preference') continue;
             const condLabel = normalizeQuestionnaireCondition(r.condition);
             const order = conditionOrder[pid]?.[condLabel] ?? '';
+            const key = r.key;
 
-            // Drop AR-only items for On-Screen rows in PCUE-Q
-            if (settings.questionnaires.dropArOnlyForOnScreen
+            // AR-only PCUE-Q items: keep the row but set value to NA for On-Screen.
+            // Preserves the (participant × item × condition) cube so analyst-side
+            // group_by counts are consistent and lme4 handles NA cleanly.
+            const isArOnlyOnScreen = settings.questionnaires.dropArOnlyForOnScreen
                 && r.questionnaire === 'pcueq'
                 && condLabel === 'On-Screen'
-                && arOnlyKeys.has(r.key.toUpperCase())) {
-                continue;
-            }
+                && PCUEQ_AR_ONLY.has(key);
 
-            const numVal = r.value === '' ? '' : parseFloat(r.value);
-            const valOut = (r.value === '' || isNaN(numVal)) ? r.value : numVal;
+            let valOut, valReversed;
+            if (isArOnlyOnScreen) {
+                valOut = 'NA';
+                valReversed = 'NA';
+            } else {
+                const numVal = r.value === '' ? '' : parseFloat(r.value);
+                valOut = (r.value === '' || isNaN(numVal)) ? 'NA' : numVal;
+                valReversed = reverseValueFor(r.questionnaire, key, valOut === 'NA' ? '' : valOut);
+                if (valReversed === '') valReversed = 'NA';
+            }
 
             rows.push({
                 pid,
                 questionnaire: r.questionnaire,
                 condition: condLabel,
                 condition_order: order,
-                key: r.key,
+                key,
                 value: valOut,
+                value_reversed: valReversed,
             });
 
-            if (r.questionnaire === 'nasa_tlx' && typeof valOut === 'number') {
-                if (!tlxScores[condLabel]) tlxScores[condLabel] = { sum: 0, n: 0 };
-                tlxScores[condLabel].sum += valOut;
-                tlxScores[condLabel].n += 1;
+            if (r.questionnaire === 'nasa_tlx' && typeof valReversed === 'number') {
+                if (!tlxScoresReversed[condLabel]) tlxScoresReversed[condLabel] = { sum: 0, n: 0 };
+                tlxScoresReversed[condLabel].sum += valReversed;
+                tlxScoresReversed[condLabel].n += 1;
             }
         }
 
         if (settings.questionnaires.computeNasaTlxOverall) {
-            for (const cond of Object.keys(tlxScores)) {
-                const s = tlxScores[cond];
+            for (const cond of Object.keys(tlxScoresReversed)) {
+                const s = tlxScoresReversed[cond];
+                const overall = s.n > 0 ? s.sum / s.n : 'NA';
                 rows.push({
                     pid,
                     questionnaire: 'nasa_tlx',
                     condition: cond,
                     condition_order: conditionOrder[pid]?.[cond] ?? '',
                     key: 'overall_mean',
-                    value: s.n > 0 ? s.sum / s.n : '',
+                    value: overall,
+                    value_reversed: overall,  // already in higher=better orientation
                 });
             }
         }
     }
 
     if (rows.length === 0) return null;
-    return { headers: ['pid', 'questionnaire', 'condition', 'condition_order', 'key', 'value'], rows };
+    return {
+        headers: ['pid', 'questionnaire', 'condition', 'condition_order', 'key', 'value', 'value_reversed'],
+        rows,
+    };
 };
 
 // --- README -----------------------------------------------------------------
@@ -718,18 +815,39 @@ const buildReadme = (settings, tables) => {
     }
     if (tables.questionnaires) {
         lines.push('questionnaires.csv — long-format survey responses.');
+        lines.push('  Columns: pid, questionnaire, condition, condition_order, key, value, value_reversed.');
+        lines.push('  value          — raw survey response, exactly as recorded (NA if missing or not applicable).');
+        lines.push('  value_reversed — survey response in "higher = better" orientation. For non-reverse-scored items');
+        lines.push('                   this equals value. For PCUE-Q items A4, C1, C2, D1 (negatively phrased) it');
+        lines.push('                   equals (scale_min + scale_max − value). Use this column for summing/averaging.');
         if (settings.questionnaires.dropArOnlyForOnScreen) {
-            lines.push(`  PCUE-Q items {${settings.questionnaires.arOnlyKeys}} dropped for On-Screen rows (AR-only items).`);
+            lines.push('  AR-only PCUE-Q items (B5, C4) are exported as NA for On-Screen rows so the participant ×');
+            lines.push('                   item × condition cube remains complete. Filter with !is.na(value) if needed.');
         }
         if (settings.questionnaires.computeNasaTlxOverall) {
-            lines.push('  Includes synthetic key=overall_mean per (pid × condition) = mean of NASA-TLX q0..q5.');
+            lines.push('  Includes synthetic key=overall_mean per (pid × condition) = mean of NASA-TLX value_reversed.');
         }
+        lines.push('');
+    }
+    if (tables.questions_dictionary) {
+        lines.push('questions_dictionary.csv — metadata for every (questionnaire, key) in questionnaires.csv.');
+        lines.push('  Columns: questionnaire, key, category, question_text, scale_type, scale_min, scale_max,');
+        lines.push('           is_reverse_scored, ar_only.');
+        lines.push('  Join onto questionnaires.csv by (questionnaire, key) to get human-readable labels and metadata.');
+        lines.push('  NASA-TLX: 0–100 interval scale, items q0..q5 (Mental Demand, Physical Demand, Temporal Demand,');
+        lines.push('            Performance, Effort, Frustration).');
+        lines.push('  PCUE-Q:   1–5 Likert scale, items A1..D2 grouped into four categories. Reverse-scored items:');
+        lines.push('            A4, C1, C2, D1 (already accounted for in value_reversed). ar_only=1 marks items');
+        lines.push('            applicable only to AR-mediated viewing (B5, C4).');
         lines.push('');
     }
     lines.push('Quick start in R:');
     lines.push('  library(tidyverse)');
     lines.push('  participants <- read_csv("participants.csv")');
     lines.push('  t1 <- read_csv("task1_placing.csv") |> left_join(participants, by = "pid")');
+    lines.push('  q  <- read_csv("questionnaires.csv") |>');
+    lines.push('          left_join(read_csv("questions_dictionary.csv"), by = c("questionnaire", "key"))');
+    lines.push('  # use value_reversed for analysis; question_text for labels in plots/tables.');
     return lines.join('\n');
 };
 
@@ -752,7 +870,11 @@ export const buildExportArchive = async (rawFiles, csvFilesList, settings) => {
     if (t3) tables.task3_reaching = t3;
 
     const q = buildQuestionnaireTable(csvFilesList, conditionOrder, settings);
-    if (q) tables.questionnaires = q;
+    if (q) {
+        tables.questionnaires = q;
+        // Always bundle the dictionary so the questionnaires file is self-documenting.
+        tables.questions_dictionary = buildQuestionsDictionary();
+    }
 
     const zip = new JSZip();
     for (const [name, tbl] of Object.entries(tables)) {
