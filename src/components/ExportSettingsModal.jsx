@@ -272,19 +272,11 @@ const ExportSettingsModal = ({ rawFiles, csvFiles, onClose }) => {
                         {q.include && (
                             <div style={{ paddingLeft: '24px' }}>
                                 <Toggle
-                                    label="Drop AR-only PCUE-Q items for On-Screen rows"
+                                    label="Mark AR-only PCUE-Q items (B5, C4) as NA for On-Screen rows"
+                                    hint="B5 and C4 only apply to AR-mediated viewing (display occlusion / headset comfort). For On-Screen condition both value and value_reversed are set to NA explicitly. Off: leaves whatever the source CSV recorded (usually still NA / empty)."
                                     value={q.dropArOnlyForOnScreen}
                                     onChange={update('questionnaires.dropArOnlyForOnScreen')}
                                 />
-                                {q.dropArOnlyForOnScreen && (
-                                    <TextField
-                                        label="AR-only item keys"
-                                        hint="default: B5,C4 (only valid for AR-VST and AR-OST)"
-                                        value={q.arOnlyKeys}
-                                        onChange={update('questionnaires.arOnlyKeys')}
-                                        width="120px"
-                                    />
-                                )}
                                 <Toggle
                                     label="Compute NASA-TLX overall_mean (per pid × condition)"
                                     value={q.computeNasaTlxOverall}

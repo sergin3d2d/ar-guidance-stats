@@ -62,8 +62,11 @@ export const DEFAULT_EXPORT_SETTINGS = {
     },
     questionnaires: {
         include: true,
-        dropArOnlyForOnScreen: true,  // B5 and C4 are PCUE-Q items only valid for AR conditions
-        arOnlyKeys: 'B5,C4',
+        // When true, AR-only PCUE-Q items (B5, C4 — hardcoded) are explicitly
+        // marked NA in both value and value_reversed for On-Screen rows. The
+        // row itself is still emitted to keep the participant × item ×
+        // condition cube complete.
+        dropArOnlyForOnScreen: true,
         computeNasaTlxOverall: true,
         parseVisionScore: true,
     },
