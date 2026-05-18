@@ -349,6 +349,16 @@ const getRefData = (obstruction) => {
             refCache[key].curated = false;
         }
         refCache[key].arclength = cumulativeArclength(refCache[key].path);
+        // Height (Y) range — used to normalize concave/convex region info.
+        let yMin = Infinity, yMax = -Infinity;
+        for (const p of refCache[key].path) {
+            if (p.x === null) continue;
+            if (p.y < yMin) yMin = p.y;
+            if (p.y > yMax) yMax = p.y;
+        }
+        refCache[key].yMin = yMin;
+        refCache[key].yMax = yMax;
+        refCache[key].yMid = (yMin + yMax) / 2;
         const milestoneIdx = new Set();
         for (const m of refCache[key].milestones) {
             let bestIdx = 0, bestSq = Infinity;
@@ -471,11 +481,14 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
             }
 
             // Profile binned along reference arclength — uses ref→user (chart algo).
+            // Each bin also carries the reference path's mean height at that
+            // arclength so lateral deviation can be correlated with surface shape.
             if (settings.task2.deviationProfile) {
                 const nBins = Math.max(2, settings.task2.deviationProfileBins | 0);
                 const totalArc = ref.arclength[ref.arclength.length - 1] || 1;
+                const yRange = (ref.yMax - ref.yMin) || 1;
                 const bins = Array.from({ length: nBins }, () => ({
-                    latSum: 0, absLatSum: 0, absLatMax: 0, n: 0,
+                    latSum: 0, absLatSum: 0, absLatMax: 0, heightSum: 0, n: 0,
                 }));
                 for (const d of refDevs) {
                     if (!d || d.dev_lateral_mm === null) continue;
@@ -486,10 +499,12 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                     bins[binIdx].latSum += d.dev_lateral_mm;
                     bins[binIdx].absLatSum += absLat;
                     bins[binIdx].absLatMax = Math.max(bins[binIdx].absLatMax, absLat);
+                    bins[binIdx].heightSum += (d.ref_y - ref.yMin) / yRange;
                     bins[binIdx].n += 1;
                 }
                 bins.forEach((b, i) => {
                     if (b.n === 0) return;
+                    const heightNorm = b.heightSum / b.n;
                     profileRows.push({
                         ...baseKeys,
                         bin_index: i,
@@ -498,6 +513,8 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                         dev_lateral_signed_mean_mm: b.latSum / b.n,
                         dev_lateral_abs_mean_mm: b.absLatSum / b.n,
                         dev_lateral_abs_max_mm: b.absLatMax,
+                        ref_height_norm: heightNorm,
+                        ref_region: heightNorm >= 0.5 ? 'convex' : 'concave',
                     });
                 });
             }
@@ -547,9 +564,13 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
         const refRows = [];
         for (const obstruction of conditionsUsed) {
             const ref = getRefData(obstruction);
+            const yRange = (ref.yMax - ref.yMin) || 1;
             for (let j = 0; j < ref.path.length; j++) {
                 const r = ref.path[j];
                 if (r.x === null) continue;
+                // height_norm: 0 = lowest point of this reference (concave),
+                // 1 = highest (convex). region: discrete label vs the midline.
+                const heightNorm = (r.y - ref.yMin) / yRange;
                 refRows.push({
                     obstruction,
                     ref_index: j,
@@ -557,6 +578,8 @@ const buildTask2Tables = (rawFiles, conditionOrder, settings) => {
                     x_mm: r.x * 1000,
                     y_mm: r.y * 1000,
                     z_mm: r.z * 1000,
+                    height_norm: heightNorm,
+                    region: r.y >= ref.yMid ? 'convex' : 'concave',
                     is_milestone: ref.milestoneIndices.has(j) ? 1 : 0,
                 });
             }
@@ -796,6 +819,11 @@ const buildReadme = (settings, tables) => {
         lines.push(`task2_deviation_profile.csv — per-trial lateral deviation binned into ${settings.task2.deviationProfileBins} equal-width bins along reference arclength.`);
         lines.push('  Each bin carries signed mean, abs mean, and abs max for that arclength slice.');
         lines.push('  Uses the same ref→user algorithm as the chart and the summary table.');
+        lines.push('  ref_height_norm — mean reference-path height (Y) in the bin, normalized 0..1');
+        lines.push('                    (0 = lowest point of this reference = concave, 1 = highest = convex).');
+        lines.push('  ref_region      — discrete label: convex if ref_height_norm >= 0.5, else concave.');
+        lines.push('  Lets lateral deviation be modelled against surface shape, e.g.');
+        lines.push('    lmer(dev_lateral_abs_mean_mm ~ ref_height_norm + condition + (1|pid), data = profile)');
         lines.push('');
     }
     if (tables.task2_drawpoints) {
@@ -809,8 +837,15 @@ const buildReadme = (settings, tables) => {
         lines.push('');
     }
     if (tables.reference_paths) {
-        lines.push('reference_paths.csv — smoothed reference path per obstruction (Visible / Obstruct).');
+        lines.push('reference_paths.csv — reference path geometry per obstruction (Visible / Obstruct).');
         lines.push('  Same surface-local frame as task2_drawpoints. Units = millimeters.');
+        lines.push('  Columns: obstruction, ref_index, arclength_m, x_mm, y_mm, z_mm,');
+        lines.push('           height_norm, region, is_milestone.');
+        lines.push('  y_mm        — the reference point height (surface-local Y).');
+        lines.push('  height_norm — y normalized 0..1 within each obstruction (0 = lowest = concave,');
+        lines.push('                1 = highest = convex). This is the continuous shape signal that the');
+        lines.push('                dashboard chart background gradient uses.');
+        lines.push('  region      — discrete convex/concave label (y >= midline → convex).');
         lines.push('');
     }
     if (tables.task3_reaching) {
