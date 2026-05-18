@@ -36,13 +36,6 @@ const obstructRefDistances = cumulativeArclength(obstructRefPoints);
 // (not the .txt clustered red dots) so the dashboard uses the same M01..M15
 // numbering as the Maya export. See buildJsonMilestones inside Task2Analytics.
 
-const calculateYMid = (points) => {
-    const ys = points.map((p) => p.y).filter((y) => y !== null && y !== undefined);
-    if (ys.length === 0) return 0;
-    return (Math.min(...ys) + Math.max(...ys)) / 2;
-};
-const visibleYMid = calculateYMid(visibleRefPoints);
-const obstructYMid = calculateYMid(obstructRefPoints);
 
 const Task2Analytics = ({ participantData, participantId }) => {
     const [selectedMethods, setSelectedMethods] = useState(null);
@@ -413,7 +406,6 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             return acc;
                         }, {})
                     ).map(([conditionName, seriesGroup], cIdx) => {
-                        const yMid = conditionName === 'Visible' ? visibleYMid : obstructYMid;
                         // Use the original visual reference (smoothed nearest-neighbor)
                         // for the chart X axis — same path as Maya / 3D Spatial Trace.
                         const refPointsRaw = conditionName === 'Visible' ? visibleRefPoints : obstructRefPoints;
@@ -454,32 +446,51 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             return { arc: refDist[bestIdx] || 0, label: m.label, sphereName: m.name };
                         });
 
-                        // Convex/concave background regions (heuristic: above/below ref Y midline)
+                        // Background gradient: each thin vertical strip is colored by the
+                        // reference path's Y value at that arclength — a proxy for the
+                        // surface's convex/concave shape. Lowest Y → red, highest Y → green.
                         const bgShapes = [];
-                        let currentState = null;
-                        let startX = 0;
+                        const N_STRIPS = 200;
+                        const stripYSum = new Array(N_STRIPS).fill(0);
+                        const stripYCount = new Array(N_STRIPS).fill(0);
+                        let refMinY = Infinity, refMaxY = -Infinity;
                         for (let j = 0; j < refPath.length; j++) {
                             if (refPath[j].x === null) continue;
-                            const state = refPath[j].y > yMid ? 'convex' : 'concave';
-                            if (currentState === null) {
-                                currentState = state;
-                                startX = refDist[j];
-                            } else if (currentState !== state) {
-                                bgShapes.push({
-                                    type: 'rect', xref: 'x', yref: 'paper',
-                                    x0: startX, x1: refDist[j], y0: 0, y1: 1,
-                                    fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.08)' : 'rgba(100,200,100,0.08)',
-                                    layer: 'below', line: { width: 0 },
-                                });
-                                currentState = state;
-                                startX = refDist[j];
-                            }
+                            const y = refPath[j].y;
+                            if (y < refMinY) refMinY = y;
+                            if (y > refMaxY) refMaxY = y;
+                            let s = Math.floor((refDist[j] / (totalArc || 1)) * N_STRIPS);
+                            if (s >= N_STRIPS) s = N_STRIPS - 1;
+                            if (s < 0) s = 0;
+                            stripYSum[s] += y;
+                            stripYCount[s] += 1;
                         }
-                        if (currentState !== null && refPath.length > 0) {
+                        const refYRange = (refMaxY - refMinY) || 1;
+                        // Red (low) → green (high) via an intermediate amber so the ramp
+                        // reads clearly. Kept at low opacity so the deviation line stays legible.
+                        const gradientColor = (t) => {
+                            const clamped = Math.max(0, Math.min(1, t));
+                            let r, g, b;
+                            if (clamped < 0.5) {
+                                const u = clamped / 0.5;          // red → amber
+                                r = 235; g = Math.round(90 + u * (175 - 90)); b = 75;
+                            } else {
+                                const u = (clamped - 0.5) / 0.5;  // amber → green
+                                r = Math.round(235 + u * (90 - 235)); g = 175; b = Math.round(75 + u * (110 - 75));
+                            }
+                            return `rgba(${r},${g},${b},0.16)`;
+                        };
+                        let lastT = 0.5;
+                        for (let s = 0; s < N_STRIPS; s++) {
+                            const t = stripYCount[s] > 0
+                                ? (stripYSum[s] / stripYCount[s] - refMinY) / refYRange
+                                : lastT;  // carry the previous strip's value into empty strips
+                            lastT = t;
                             bgShapes.push({
                                 type: 'rect', xref: 'x', yref: 'paper',
-                                x0: startX, x1: totalArc, y0: 0, y1: 1,
-                                fillcolor: currentState === 'convex' ? 'rgba(255,100,100,0.08)' : 'rgba(100,200,100,0.08)',
+                                x0: (s / N_STRIPS) * totalArc, x1: ((s + 1) / N_STRIPS) * totalArc,
+                                y0: 0, y1: 1,
+                                fillcolor: gradientColor(t),
                                 layer: 'below', line: { width: 0 },
                             });
                         }
@@ -543,7 +554,7 @@ const Task2Analytics = ({ participantData, participantId }) => {
                             <div key={cIdx} className="glass-card" style={{ padding: '20px' }}>
                                 <h4 style={{ fontSize: '1rem', color: 'var(--text)', marginBottom: '10px' }}>Path Deviation Profile: {conditionName}</h4>
                                 <p style={{ fontSize: '0.85rem', color: 'var(--text-dim)', marginBottom: '15px' }}>
-                                    Walks along the smoothed reference path; for each ref point, finds the closest user-trace point and reports lateral deviation. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}X = arclength along reference (one Y per X). Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones M01…M15 (JSON sphere IDs, same as Maya). Background tints: convex (red) vs concave (green) reference segments. Total path length ≈ {totalArc.toFixed(2)} m.
+                                    Walks along the smoothed reference path; for each ref point, finds the closest user-trace point and reports lateral deviation. {reversed ? 'Reference direction was auto-flipped so X=0 matches where the user started. ' : ''}X = arclength along reference (one Y per X). Y = lateral deviation in mm (in-surface, signed). Diamonds mark milestones M01…M15 (JSON sphere IDs, same as Maya). Background gradient encodes the reference path's height (Y) at each arclength — red = lowest (concave), green = highest (convex). Total path length ≈ {totalArc.toFixed(2)} m.
                                 </p>
                                 <Plot
                                     data={traces}
