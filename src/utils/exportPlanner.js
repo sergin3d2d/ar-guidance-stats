@@ -13,6 +13,7 @@ import {
     computeRefPathDeviations,
     normalizeTimestampsToSeconds,
 } from './task2Spatial';
+import { getCuratedReferencePath } from '../data/curatedReferences';
 import visibleTxtRaw from '../../Visible.txt?raw';
 import obstructTxtRaw from '../../Obstruct.txt?raw';
 
@@ -338,7 +339,15 @@ const getRefData = (obstruction) => {
     const isObstruct = String(obstruction).toLowerCase().includes('obstruct');
     const key = isObstruct ? 'obstruct' : 'visible';
     if (!refCache[key]) {
-        refCache[key] = parseReferenceTxt(isObstruct ? obstructTxtRaw : visibleTxtRaw);
+        // Prefer a hand-curated path (imported from Maya) if one exists;
+        // otherwise fall back to the algorithmic parseReferenceTxt result.
+        const curated = getCuratedReferencePath(key);
+        if (curated) {
+            refCache[key] = { path: curated, milestones: [], curated: true };
+        } else {
+            refCache[key] = parseReferenceTxt(isObstruct ? obstructTxtRaw : visibleTxtRaw);
+            refCache[key].curated = false;
+        }
         refCache[key].arclength = cumulativeArclength(refCache[key].path);
         const milestoneIdx = new Set();
         for (const m of refCache[key].milestones) {

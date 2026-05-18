@@ -14,22 +14,36 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SAMPLE_DIR = 'D:/AI/DataAnalysis/ar-guidance-stats/P01';
 const OUT_DIR = 'D:/AI/DataAnalysis/ar-guidance-stats/maya_export';
 
+const CURATED_DIR = path.resolve(__dirname, '../src/data');
+
 // Each entry: which reference .txt to use, which traced JSON to register,
 // and the prefix for the two .ma output files.
 const EXPORTS = [
     {
+        obstruction: 'visible',
         refTxt: 'D:/AI/DataAnalysis/ar-guidance-stats/Visible.txt',
         tracedFile: 'ID1__Screen__Task2_Tracing__Visible_collect_20260320_103034.json',
         outRefName: 'P01_visible_reference.ma',
         outTracedName: 'P01_OnScreen_Visible_traced.ma',
     },
     {
+        obstruction: 'obstruct',
         refTxt: 'D:/AI/DataAnalysis/ar-guidance-stats/Obstruct.txt',
         tracedFile: 'ID1__Screen__Task2_Tracing__Obstruct_collect_20260320_103150.json',
         outRefName: 'P01_obstruct_reference.ma',
         outTracedName: 'P01_OnScreen_Obstruct_traced.ma',
     },
 ];
+
+// Load a hand-curated reference path (reference_<obstruction>.json) if present.
+// Returns an {x,y,z} array or null.
+const loadCuratedReference = (obstruction) => {
+    const file = path.join(CURATED_DIR, `reference_${obstruction}.json`);
+    if (!fs.existsSync(file)) return null;
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!Array.isArray(data.points)) return null;
+    return data.points.map(([x, y, z]) => ({ x, y, z }));
+};
 
 const {
     parseReferenceTxt,
@@ -119,12 +133,21 @@ const orderMilestonesByArclength = (refPoints, refDistances, milestones) => {
 
 if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
 
-const exportPair = ({ refTxt, tracedFile, outRefName, outTracedName }) => {
+const exportPair = ({ obstruction, refTxt, tracedFile, outRefName, outTracedName }) => {
     console.log(`\n=== ${outRefName} + ${outTracedName} ===`);
 
     const refTxtContent = fs.readFileSync(refTxt, 'utf8');
-    // Original smoothed reference (default options).
-    const refSmooth = parseReferenceTxt(refTxtContent);
+    // Prefer a hand-curated reference (imported from Maya) if available;
+    // otherwise use the algorithmic parseReferenceTxt result.
+    const curated = loadCuratedReference(obstruction);
+    let refSmooth;
+    if (curated) {
+        refSmooth = { path: curated, milestones: [] };
+        console.log(`  Reference: CURATED (${curated.length} pts from reference_${obstruction}.json)`);
+    } else {
+        refSmooth = parseReferenceTxt(refTxtContent);
+        console.log(`  Reference: algorithmic parseReferenceTxt`);
+    }
     const refSmoothArc = cumulativeArclength(refSmooth.path);
 
     const tracedJson = JSON.parse(fs.readFileSync(path.join(SAMPLE_DIR, tracedFile), 'utf8'));

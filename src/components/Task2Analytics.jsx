@@ -15,13 +15,18 @@ import {
 
 import visibleTxtRaw from '../../Visible.txt?raw';
 import obstructTxtRaw from '../../Obstruct.txt?raw';
+import { getCuratedReferencePath } from '../data/curatedReferences';
 
-// Visual reference (smoothed nearest-neighbor) — used by 3D Spatial Trace.
+// Reference path per obstruction. If a hand-curated path exists (imported
+// from Maya, see scripts/import_maya_reference.mjs) it is used directly;
+// otherwise the algorithmic parseReferenceTxt result is used.
 const visibleRefData = parseReferenceTxt(visibleTxtRaw);
 const obstructRefData = parseReferenceTxt(obstructTxtRaw);
-const visibleRefPoints = visibleRefData.path;
+const visibleCurated = getCuratedReferencePath('visible');
+const obstructCurated = getCuratedReferencePath('obstruct');
+const visibleRefPoints = visibleCurated || visibleRefData.path;
+const obstructRefPoints = obstructCurated || obstructRefData.path;
 const visibleRefMilestones = visibleRefData.milestones;
-const obstructRefPoints = obstructRefData.path;
 const obstructRefMilestones = obstructRefData.milestones;
 const visibleRefDistances = cumulativeArclength(visibleRefPoints);
 const obstructRefDistances = cumulativeArclength(obstructRefPoints);
