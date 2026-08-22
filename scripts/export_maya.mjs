@@ -66,7 +66,7 @@ currentUnit -l meter -a degree -t film;
 fileInfo "application" "maya";
 fileInfo "product" "Maya 2023";
 fileInfo "version" "2023";
-fileInfo "cutIdentifier" "exported-from-ar-guidance-analyzer";
+fileInfo "cutIdentifier" "exported-from-data-aggregation-tool";
 `;
 
 const mayaTransformGroup = (name, parent = null) => {

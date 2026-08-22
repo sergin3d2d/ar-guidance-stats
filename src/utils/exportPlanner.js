@@ -772,7 +772,7 @@ const buildQuestionnaireTable = (csvFilesList, conditionOrder, settings) => {
 
 const buildReadme = (settings, tables) => {
     const lines = [];
-    lines.push('AR Guidance Analyzer — data export');
+    lines.push('Data Aggregation Tool — data export');
     lines.push('Generated: ' + new Date().toISOString());
     lines.push('');
     lines.push('Files in this archive:');

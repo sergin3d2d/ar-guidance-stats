@@ -1,7 +1,7 @@
-# AR Guidance Analyzer - Documentation
+# Data Aggregation Tool - Documentation
 
 ## Project Overview
-The **AR Guidance Analyzer** is a React-based analytics dashboard designed to process, visualize, and compare user performance data from Augmented Reality (AR) guidance experiments. It allows researchers to ingest experimental logs and survey data to evaluate different guidance methods (e.g., Screen, HoloLens 2, Quest 3) under varying conditions (e.g., Visible vs. Obstructed targets).
+The **Data Aggregation Tool** is a React-based analytics dashboard designed to process, visualize, and compare user performance data from Augmented Reality (AR) guidance experiments. It allows researchers to ingest experimental logs and survey data to evaluate different guidance methods (e.g., Screen, HoloLens 2, Quest 3) under varying conditions (e.g., Visible vs. Obstructed targets).
 
 ---
 

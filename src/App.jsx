@@ -48,7 +48,7 @@ const App = () => {
       <header className="header">
         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
           <Activity size={32} color="#00f2ff" />
-          <h1 style={{ fontSize: '1.5rem', margin: 0, letterSpacing: '2px' }}>AR GUIDANCE ANALYZER</h1>
+          <h1 style={{ fontSize: '1.5rem', margin: 0, letterSpacing: '2px' }}>DATA AGGREGATION TOOL</h1>
         </div>
         <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
           {data && (
